@@ -1,6 +1,23 @@
 const express = require('express');
 const cors = require('cors');
-const jobIdFetcher = require('./jobIdFetcher');
+const fs = require('fs');
+const path = require('path');
+
+// Try to load jobIdFetcher, but don't crash if it fails
+let jobIdFetcher = null;
+const jobIdFetcherPath = path.join(__dirname, 'jobIdFetcher.js');
+if (fs.existsSync(jobIdFetcherPath)) {
+    try {
+        jobIdFetcher = require('./jobIdFetcher');
+        console.log('[Server] Job ID fetcher module loaded successfully');
+    } catch (error) {
+        console.error('[Server] Failed to load jobIdFetcher module:', error.message);
+        console.error('[Server] Server will continue without job ID caching');
+    }
+} else {
+    console.warn('[Server] jobIdFetcher.js not found at:', jobIdFetcherPath);
+    console.warn('[Server] Server will continue without job ID caching');
+}
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -56,6 +73,7 @@ app.post('/api/pet-found', rateLimit, (req, res) => {
         const finds = body.finds || [body];
         
         if (!Array.isArray(finds) || finds.length === 0) {
+            console.error('[API] Invalid request - no finds array');
             return res.status(400).json({ 
                 success: false, 
                 error: 'Invalid request. Expected "finds" array or single find object.' 
@@ -66,15 +84,21 @@ app.post('/api/pet-found', rateLimit, (req, res) => {
         let addedCount = 0;
         
         for (const findData of finds) {
+            // Validate required fields
+            if (!findData.petName) {
+                console.warn('[API] Skipping find with missing petName:', findData);
+                continue;
+            }
+            
             const find = {
                 id: Date.now().toString() + "_" + Math.random().toString(36).substr(2, 9),
                 petName: findData.petName,
-                generation: findData.generation,
-                mps: findData.mps,
+                generation: findData.generation || "N/A",
+                mps: findData.mps || 0,
                 rarity: findData.rarity || "Unknown",
-                placeId: findData.placeId,
-                jobId: findData.jobId,
-                playerCount: findData.playerCount,
+                placeId: findData.placeId || 0,
+                jobId: findData.jobId || "",
+                playerCount: findData.playerCount || 0,
                 maxPlayers: findData.maxPlayers || 6,
                 accountName: findData.accountName || accountName,
                 timestamp: findData.timestamp || Date.now(),
@@ -92,6 +116,7 @@ app.post('/api/pet-found', rateLimit, (req, res) => {
         console.log(`[API] Received batch of ${addedCount} pet finds from ${accountName}`);
         if (addedCount > 0) {
             console.log(`[API] Sample find - petName: ${petFinds[0].petName}, mps: ${petFinds[0].mps}, placeId: ${petFinds[0].placeId}, jobId: ${petFinds[0].jobId}`);
+            console.log(`[API] Total finds in storage: ${petFinds.length}`);
         }
         
         res.status(200).json({ 
@@ -100,7 +125,8 @@ app.post('/api/pet-found', rateLimit, (req, res) => {
             received: addedCount 
         });
     } catch (error) {
-        console.error('[API] Error:', error);
+        console.error('[API] Error processing pet finds:', error);
+        console.error('[API] Error stack:', error.stack);
         res.status(500).json({ success: false, error: error.message });
     }
 });
@@ -192,6 +218,13 @@ app.get('/api/finds/all', (req, res) => {
 // Job ID endpoints for server hopping
 app.get('/api/job-ids', (req, res) => {
     try {
+        if (!jobIdFetcher) {
+            return res.status(503).json({ 
+                success: false, 
+                error: 'Job ID fetcher module not available' 
+            });
+        }
+        
         const limit = parseInt(req.query.limit) || 100;
         const exclude = req.query.exclude ? req.query.exclude.split(',') : [];
         
@@ -222,6 +255,13 @@ app.get('/api/job-ids', (req, res) => {
 
 app.get('/api/job-ids/info', (req, res) => {
     try {
+        if (!jobIdFetcher) {
+            return res.status(503).json({ 
+                success: false, 
+                error: 'Job ID fetcher module not available' 
+            });
+        }
+        
         jobIdFetcher.loadCache();
         const cacheInfo = jobIdFetcher.getCacheInfo();
         res.json({
@@ -236,6 +276,13 @@ app.get('/api/job-ids/info', (req, res) => {
 
 app.post('/api/job-ids/refresh', (req, res) => {
     try {
+        if (!jobIdFetcher) {
+            return res.status(503).json({ 
+                success: false, 
+                error: 'Job ID fetcher module not available' 
+            });
+        }
+        
         console.log('[API] Manual cache refresh requested');
         jobIdFetcher.fetchBulkJobIds()
             .then(result => {
@@ -272,36 +319,54 @@ app.get('/', (req, res) => {
     });
 });
 
-// Load job ID cache on startup
-jobIdFetcher.loadCache();
-const cacheInfo = jobIdFetcher.getCacheInfo();
-console.log(`[JobIDs] Loaded ${cacheInfo.count} cached job IDs (last updated: ${cacheInfo.lastUpdated || 'never'})`);
-
-// If cache is empty or low, fetch immediately on startup
-if (cacheInfo.count < 1000) {
-    console.log('[JobIDs] Cache is low, fetching job IDs immediately...');
-    jobIdFetcher.fetchBulkJobIds()
-        .then(result => {
-            jobIdFetcher.saveCache();
-            console.log(`[JobIDs] Initial fetch complete: ${result.total} total job IDs cached`);
-        })
-        .catch(error => {
-            console.error('[JobIDs] Initial fetch failed:', error.message);
-        });
+// Load job ID cache on startup (only if module loaded)
+if (jobIdFetcher) {
+    try {
+        jobIdFetcher.loadCache();
+        const cacheInfo = jobIdFetcher.getCacheInfo();
+        console.log(`[JobIDs] Loaded ${cacheInfo.count} cached job IDs (last updated: ${cacheInfo.lastUpdated || 'never'})`);
+        
+        // If cache is empty or low, fetch immediately on startup
+        if (cacheInfo.count < 1000) {
+            console.log('[JobIDs] Cache is low, fetching job IDs immediately...');
+            jobIdFetcher.fetchBulkJobIds()
+                .then(result => {
+                    jobIdFetcher.saveCache();
+                    console.log(`[JobIDs] Initial fetch complete: ${result.total} total job IDs cached`);
+                })
+                .catch(error => {
+                    console.error('[JobIDs] Initial fetch failed:', error.message);
+                });
+        }
+        
+        // Auto-refresh cache every 10 minutes to get fresh servers
+        setInterval(() => {
+            console.log('[JobIDs] Auto-refreshing job ID cache (every 10 minutes)...');
+            jobIdFetcher.fetchBulkJobIds()
+                .then(result => {
+                    jobIdFetcher.saveCache();
+                    console.log(`[JobIDs] Auto-refresh complete: ${result.total} total job IDs cached`);
+                })
+                .catch(error => {
+                    console.error('[JobIDs] Auto-refresh failed:', error.message);
+                });
+        }, 10 * 60 * 1000); // 10 minutes - refresh more frequently for fresh servers
+    } catch (error) {
+        console.error('[JobIDs] Error initializing job ID cache:', error.message);
+    }
+} else {
+    console.warn('[JobIDs] Job ID fetcher module not available - server hopping bypass disabled');
 }
 
-// Auto-refresh cache every 10 minutes to get fresh servers
-setInterval(() => {
-    console.log('[JobIDs] Auto-refreshing job ID cache (every 10 minutes)...');
-    jobIdFetcher.fetchBulkJobIds()
-        .then(result => {
-            jobIdFetcher.saveCache();
-            console.log(`[JobIDs] Auto-refresh complete: ${result.total} total job IDs cached`);
-        })
-        .catch(error => {
-            console.error('[JobIDs] Auto-refresh failed:', error.message);
-        });
-}, 10 * 60 * 1000); // 10 minutes - refresh more frequently for fresh servers
+// Error handler for uncaught errors
+process.on('uncaughtException', (error) => {
+    console.error('[Fatal] Uncaught Exception:', error);
+    console.error('[Fatal] Stack:', error.stack);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('[Fatal] Unhandled Rejection at:', promise, 'reason:', reason);
+});
 
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`[API] Pet Finder API Server running on port ${PORT}`);
@@ -310,9 +375,15 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log(`[API]   POST /api/pet-found - Receive pet finds (batched)`);
     console.log(`[API]   GET  /api/finds - Get all finds`);
     console.log(`[API]   GET  /api/finds/recent - Get recent finds (public)`);
+    console.log(`[API]   GET  /api/finds/all - Get all finds (debug, no time filter)`);
     console.log(`[API]   DELETE /api/finds - Clear all finds`);
     console.log(`[API]   GET  /api/health - Health check`);
-    console.log(`[API]   GET  /api/job-ids - Get cached job IDs (limit query param)`);
-    console.log(`[API]   GET  /api/job-ids/info - Get cache info`);
-    console.log(`[API]   POST /api/job-ids/refresh - Manually refresh cache`);
+    if (jobIdFetcher) {
+        console.log(`[API]   GET  /api/job-ids - Get cached job IDs (limit query param)`);
+        console.log(`[API]   GET  /api/job-ids/info - Get cache info`);
+        console.log(`[API]   POST /api/job-ids/refresh - Manually refresh cache`);
+    } else {
+        console.log(`[API]   Job ID endpoints disabled (module not loaded)`);
+    }
+    console.log(`[API] Server started successfully!`);
 });
