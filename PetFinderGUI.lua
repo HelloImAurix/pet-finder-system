@@ -405,7 +405,7 @@ local CONTENT_HEIGHT = HEIGHT - HEADER_HEIGHT - SPACING
 
 local MinMPSValue = Instance.new("NumberValue")
 MinMPSValue.Name = "MinMPSValue"
-MinMPSValue.Value = 0
+MinMPSValue.Value = 0  -- Show all finds by default
 MinMPSValue.Parent = ScreenGui
 
 local cachedFinds = {}
@@ -782,11 +782,13 @@ local function fetchFinds()
     end)
     
     if success and response then
+        print("[GUI] API response received, length:", #tostring(response))
         local success2, data = pcall(function()
             return HttpService:JSONDecode(response)
         end)
         
         if success2 and data then
+            print("[GUI] Successfully decoded JSON. Data type:", type(data))
             local finds = nil
             if type(data) == "table" then
                 if data.success and data.finds then
@@ -816,14 +818,7 @@ local function fetchFinds()
                     end
                 end
                 
-                if #cachedFinds > 0 and previousCount == 0 then
-                    for _, child in pairs(ContentFrame:GetChildren()) do
-                        if child:IsA("Frame") and (child.Name == "WaitingFrame" or child.Name ~= "UIListLayout" and child.Name ~= "UIPadding") then
-                            child:Destroy()
-                        end
-                    end
-                end
-                
+                -- Always refresh display when we get new data
                 filterAndDisplayFinds()
                 updatePetInfo()
             else
