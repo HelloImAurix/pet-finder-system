@@ -12,7 +12,7 @@ pcall(function()
 end)
 
 local API_URL = "https://empathetic-transformation-production.up.railway.app/api/pet-found"
-local API_KEY = "" -- Set your API key here (from LuArmor)
+-- No API key needed - bots can send freely
 local SCAN_INTERVAL = 0.5
 local SCANS_BEFORE_HOP = 10
 local HOP_DELAY = 1
@@ -227,7 +227,6 @@ local function sendBatchToAPI()
     
     local payload = {
         finds = batchToSend,
-        apiKey = API_KEY,
         accountName = LocalPlayer.Name,
         timestamp = os.time()
     }
@@ -240,8 +239,7 @@ local function sendBatchToAPI()
                 Url = API_URL,
                 Method = "POST",
                 Headers = {
-                    ["Content-Type"] = "application/json",
-                    ["X-API-Key"] = API_KEY
+                    ["Content-Type"] = "application/json"
                 },
                 Body = jsonData
             })
@@ -251,8 +249,7 @@ local function sendBatchToAPI()
                 Url = API_URL,
                 Method = "POST",
                 Headers = {
-                    ["Content-Type"] = "application/json",
-                    ["X-API-Key"] = API_KEY
+                    ["Content-Type"] = "application/json"
                 },
                 Body = jsonData
             })
@@ -262,8 +259,7 @@ local function sendBatchToAPI()
                 Url = API_URL,
                 Method = "POST",
                 Headers = {
-                    ["Content-Type"] = "application/json",
-                    ["X-API-Key"] = API_KEY
+                    ["Content-Type"] = "application/json"
                 },
                 Body = jsonData
             })

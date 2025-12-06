@@ -224,8 +224,8 @@ async function authenticate(req, res, next) {
 
 // ===== API ENDPOINTS =====
 
-// POST: Receive pet finds from bot (batched)
-app.post('/api/pet-found', rateLimit, authenticate, (req, res) => {
+// POST: Receive pet finds from bot (batched) - No auth required (your bots)
+app.post('/api/pet-found', rateLimit, (req, res) => {
     try {
         const body = req.body;
         const finds = body.finds || [body]; // Support both batched and single finds
@@ -267,7 +267,7 @@ app.post('/api/pet-found', rateLimit, authenticate, (req, res) => {
             petFinds = petFinds.slice(0, MAX_FINDS);
         }
         
-        console.log(`[API] Received batch of ${addedCount} pet finds from ${accountName} (${req.authenticatedUser})`);
+        console.log(`[API] Received batch of ${addedCount} pet finds from ${accountName}`);
         
         res.status(200).json({ 
             success: true, 
@@ -292,8 +292,8 @@ app.get('/api/finds', (req, res) => {
     }
 });
 
-// GET: Get recent finds (last 10 minutes) - No auth required for GUI
-app.get('/api/finds/recent', (req, res) => {
+// GET: Get recent finds (last 10 minutes) - Requires auth (for buyers using GUI)
+app.get('/api/finds/recent', rateLimit, authenticate, (req, res) => {
     try {
         const tenMinutesAgo = Date.now() - (10 * 60 * 1000);
         const recent = petFinds.filter(find => {

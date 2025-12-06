@@ -16,6 +16,7 @@ pcall(function()
 end)
 
 local API_URL = "https://empathetic-transformation-production.up.railway.app/api/finds/recent"
+local API_KEY = "" -- Set your LuArmor license key here (required for buyers)
 local UPDATE_INTERVAL = 1
 
 local Colors = {
