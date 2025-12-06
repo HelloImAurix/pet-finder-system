@@ -1,5 +1,6 @@
 const express = require('express');
 const cors = require('cors');
+const jobIdFetcher = require('./jobIdFetcher');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -153,6 +154,73 @@ app.get('/api/health', (req, res) => {
     });
 });
 
+// Job ID endpoints for server hopping
+app.get('/api/job-ids', (req, res) => {
+    try {
+        const limit = parseInt(req.query.limit) || 100;
+        const exclude = req.query.exclude ? req.query.exclude.split(',') : [];
+        
+        // Load cache
+        jobIdFetcher.loadCache();
+        let jobIds = jobIdFetcher.getJobIds();
+        
+        // Filter out excluded job IDs
+        const excludeSet = new Set(exclude);
+        jobIds = jobIds.filter(id => !excludeSet.has(id.toString()));
+        
+        // Shuffle and limit
+        const shuffled = jobIds.sort(() => Math.random() - 0.5);
+        const result = shuffled.slice(0, limit);
+        
+        res.json({
+            success: true,
+            jobIds: result,
+            count: result.length,
+            totalAvailable: jobIds.length,
+            cacheInfo: jobIdFetcher.getCacheInfo()
+        });
+    } catch (error) {
+        console.error('[API] Error fetching job IDs:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+app.get('/api/job-ids/info', (req, res) => {
+    try {
+        jobIdFetcher.loadCache();
+        const cacheInfo = jobIdFetcher.getCacheInfo();
+        res.json({
+            success: true,
+            ...cacheInfo
+        });
+    } catch (error) {
+        console.error('[API] Error getting cache info:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+app.post('/api/job-ids/refresh', (req, res) => {
+    try {
+        console.log('[API] Manual cache refresh requested');
+        jobIdFetcher.fetchBulkJobIds()
+            .then(result => {
+                jobIdFetcher.saveCache();
+                res.json({
+                    success: true,
+                    message: 'Cache refreshed successfully',
+                    ...result
+                });
+            })
+            .catch(error => {
+                console.error('[API] Error refreshing cache:', error);
+                res.status(500).json({ success: false, error: error.message });
+            });
+    } catch (error) {
+        console.error('[API] Error:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
 app.get('/', (req, res) => {
     res.json({ 
         message: 'Pet Finder API Server',
@@ -161,10 +229,31 @@ app.get('/', (req, res) => {
             'GET /api/finds': 'Get all finds',
             'GET /api/finds/recent': 'Get recent finds',
             'DELETE /api/finds': 'Clear all finds',
-            'GET /api/health': 'Health check'
+            'GET /api/health': 'Health check',
+            'GET /api/job-ids': 'Get cached job IDs for server hopping',
+            'GET /api/job-ids/info': 'Get cache info',
+            'POST /api/job-ids/refresh': 'Manually refresh job ID cache'
         }
     });
 });
+
+// Load job ID cache on startup
+jobIdFetcher.loadCache();
+const cacheInfo = jobIdFetcher.getCacheInfo();
+console.log(`[JobIDs] Loaded ${cacheInfo.count} cached job IDs (last updated: ${cacheInfo.lastUpdated || 'never'})`);
+
+// Auto-refresh cache every 30 minutes
+setInterval(() => {
+    console.log('[JobIDs] Auto-refreshing job ID cache...');
+    jobIdFetcher.fetchBulkJobIds()
+        .then(result => {
+            jobIdFetcher.saveCache();
+            console.log(`[JobIDs] Auto-refresh complete: ${result.total} total job IDs`);
+        })
+        .catch(error => {
+            console.error('[JobIDs] Auto-refresh failed:', error.message);
+        });
+}, 30 * 60 * 1000); // 30 minutes
 
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`[API] Pet Finder API Server running on port ${PORT}`);
@@ -175,4 +264,7 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log(`[API]   GET  /api/finds/recent - Get recent finds (public)`);
     console.log(`[API]   DELETE /api/finds - Clear all finds`);
     console.log(`[API]   GET  /api/health - Health check`);
+    console.log(`[API]   GET  /api/job-ids - Get cached job IDs (limit query param)`);
+    console.log(`[API]   GET  /api/job-ids/info - Get cache info`);
+    console.log(`[API]   POST /api/job-ids/refresh - Manually refresh cache`);
 });
