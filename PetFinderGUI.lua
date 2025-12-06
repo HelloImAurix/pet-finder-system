@@ -406,12 +406,20 @@ local CONTENT_HEIGHT = HEIGHT - HEADER_HEIGHT - SPACING
 local cachedFinds = {}
 
 local function displayFinds()
-    if not ContentFrame or not ContentFrame.Parent then
-        warn("[GUI] ContentFrame not available - will retry after initialization")
-        task.wait(0.5)
-        if not ContentFrame or not ContentFrame.Parent then
-            return
-        end
+    -- Ensure ContentFrame exists and is properly parented
+    if not ContentFrame then
+        warn("[GUI] ContentFrame variable not defined")
+        return
+    end
+    
+    if not ContentFrame.Parent then
+        warn("[GUI] ContentFrame has no parent (MainFrame not initialized?)")
+        return
+    end
+    
+    if not ContentFrame.Parent.Parent then
+        warn("[GUI] MainFrame has no parent (ScreenGui not initialized?)")
+        return
     end
     
     -- Ensure ContentFrame is visible
@@ -757,9 +765,13 @@ local function fetchFinds()
                     end
                 end
                 
-                -- Always refresh display when we get new data
-                displayFinds()
-                updatePetInfo()
+                -- Always refresh display when we get new data (only if ContentFrame is ready)
+                if ContentFrame and ContentFrame.Parent then
+                    displayFinds()
+                    updatePetInfo()
+                else
+                    warn("[GUI] Skipping displayFinds - ContentFrame not ready")
+                end
             else
                 warn("[GUI] API response format issue. Data type:", type(data), "Has finds:", data and data.finds ~= nil)
                 if data and type(data) == "table" then
