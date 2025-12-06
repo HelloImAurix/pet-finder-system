@@ -258,9 +258,18 @@ app.get('/api/job-ids', (req, res) => {
     try {
         if (!jobIdFetcher) {
             console.warn('[API] /api/job-ids requested but jobIdFetcher module not available');
-            return res.status(503).json({ 
-                success: false, 
-                error: 'Job ID fetcher module not available' 
+            // Return success with empty array instead of 503, so bot knows server is working
+            return res.json({ 
+                success: true,
+                jobIds: [],
+                count: 0,
+                totalAvailable: 0,
+                cacheInfo: {
+                    count: 0,
+                    lastUpdated: null,
+                    placeId: 0
+                },
+                message: 'Job ID fetcher module not available. Server is running but job ID caching is disabled.'
             });
         }
         
@@ -361,9 +370,12 @@ app.get('/api/job-ids', (req, res) => {
 app.get('/api/job-ids/info', (req, res) => {
     try {
         if (!jobIdFetcher) {
-            return res.status(503).json({ 
-                success: false, 
-                error: 'Job ID fetcher module not available' 
+            return res.json({ 
+                success: true,
+                count: 0,
+                lastUpdated: null,
+                placeId: 0,
+                message: 'Job ID fetcher module not available'
             });
         }
         
@@ -382,9 +394,9 @@ app.get('/api/job-ids/info', (req, res) => {
 app.post('/api/job-ids/refresh', (req, res) => {
     try {
         if (!jobIdFetcher) {
-            return res.status(503).json({ 
-                success: false, 
-                error: 'Job ID fetcher module not available' 
+            return res.json({ 
+                success: false,
+                message: 'Job ID fetcher module not available. Cannot refresh cache.'
             });
         }
         
