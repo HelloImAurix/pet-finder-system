@@ -302,9 +302,16 @@ app.get('/api/finds/recent', rateLimit, (req, res) => {
         });
         
         // Debug: Log what we're sending
-        console.log(`[API] Sending ${recent.length} recent finds to GUI (LuArmor protected)`);
+        console.log(`[API] Total finds in storage: ${petFinds.length}, Recent (last 10min): ${recent.length}`);
         if (recent.length > 0) {
-            console.log(`[API] First find - placeId: ${recent[0].placeId}, jobId: ${recent[0].jobId}`);
+            console.log(`[API] First find - placeId: ${recent[0].placeId}, jobId: ${recent[0].jobId}, petName: ${recent[0].petName}`);
+        } else if (petFinds.length > 0) {
+            const oldestFind = petFinds[petFinds.length - 1];
+            const oldestTime = new Date(oldestFind.receivedAt || oldestFind.timestamp * 1000).getTime();
+            const ageMinutes = Math.floor((Date.now() - oldestTime) / (60 * 1000));
+            console.log(`[API] All finds are older than 10 minutes. Oldest find is ${ageMinutes} minutes old.`);
+        } else {
+            console.log(`[API] No finds in storage at all. Waiting for bots to send data.`);
         }
         
         res.json({ success: true, finds: recent, total: recent.length });

@@ -407,8 +407,11 @@ local cachedFinds = {}
 
 local function displayFinds()
     if not ContentFrame or not ContentFrame.Parent then
-        warn("[GUI] ContentFrame not available")
-        return
+        warn("[GUI] ContentFrame not available - will retry after initialization")
+        task.wait(0.5)
+        if not ContentFrame or not ContentFrame.Parent then
+            return
+        end
     end
     
     -- Ensure ContentFrame is visible
@@ -834,15 +837,16 @@ local function fetchFinds()
     end
 end
 
+-- Wait for GUI to fully initialize before fetching
+task.wait(0.5)
+fetchFinds()
+
 task.spawn(function()
     while ScreenGui.Parent do
-        fetchFinds()
         task.wait(UPDATE_INTERVAL)
+        fetchFinds()
     end
 end)
-
-task.wait(1)
-fetchFinds()
 
 task.spawn(function()
     if not getgenv().LoadedPetFinderUI then
