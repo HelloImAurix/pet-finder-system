@@ -490,7 +490,11 @@ local function filterAndDisplayFinds()
             end)
             if success and card then
                 card.LayoutOrder = i
-                print("[GUI] Created card", i, "for:", find.petName or "Unknown", "MPS:", find.mps or 0)
+                -- Ensure card is parented (should already be done in createFindCard, but double-check)
+                if not card.Parent then
+                    card.Parent = ContentFrame
+                end
+                print("[GUI] Created card", i, "for:", find.petName or "Unknown", "MPS:", find.mps or 0, "Parent:", card.Parent and card.Parent.Name or "NONE")
             else
                 warn("[GUI] Failed to create card for:", find.petName or "Unknown", "Error:", tostring(card))
             end
