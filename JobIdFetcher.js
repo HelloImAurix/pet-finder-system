@@ -23,12 +23,31 @@ function loadCache() {
     try {
         if (fs.existsSync(CACHE_FILE)) {
             const data = fs.readFileSync(CACHE_FILE, 'utf8');
-            jobIdCache = JSON.parse(data);
-            console.log(`[Cache] Loaded ${jobIdCache.jobIds.length} job IDs from cache`);
-            return true;
+            const parsed = JSON.parse(data);
+            // Validate cache structure
+            if (parsed && Array.isArray(parsed.jobIds)) {
+                jobIdCache = parsed;
+                console.log(`[Cache] Loaded ${jobIdCache.jobIds.length} job IDs from cache`);
+                return true;
+            } else {
+                console.warn('[Cache] Cache file has invalid structure, resetting...');
+                jobIdCache = {
+                    jobIds: [],
+                    lastUpdated: null,
+                    placeId: PLACE_ID,
+                    totalFetched: 0
+                };
+            }
         }
     } catch (error) {
         console.warn('[Cache] Failed to load cache:', error.message);
+        // Reset to empty cache on error
+        jobIdCache = {
+            jobIds: [],
+            lastUpdated: null,
+            placeId: PLACE_ID,
+            totalFetched: 0
+        };
     }
     return false;
 }
@@ -205,10 +224,28 @@ module.exports = {
     fetchBulkJobIds,
     loadCache,
     saveCache,
-    getJobIds: () => jobIdCache.jobIds,
-    getCacheInfo: () => ({
-        count: jobIdCache.jobIds.length,
-        lastUpdated: jobIdCache.lastUpdated,
-        placeId: jobIdCache.placeId
-    })
+    getJobIds: () => {
+        try {
+            return jobIdCache.jobIds || [];
+        } catch (error) {
+            console.error('[Cache] Error getting job IDs:', error.message);
+            return [];
+        }
+    },
+    getCacheInfo: () => {
+        try {
+            return {
+                count: (jobIdCache.jobIds || []).length,
+                lastUpdated: jobIdCache.lastUpdated || null,
+                placeId: jobIdCache.placeId || PLACE_ID
+            };
+        } catch (error) {
+            console.error('[Cache] Error getting cache info:', error.message);
+            return {
+                count: 0,
+                lastUpdated: null,
+                placeId: PLACE_ID
+            };
+        }
+    }
 };
