@@ -1,6 +1,68 @@
+# Dependencies
 node_modules/
+# package-lock.json - Usually committed, but exclude if you prefer
+
+# Environment and secrets
 .env
+.env.local
+.env.*.local
+*.key
+*.pem
+*.secret
+secrets.json
+config.json
+config.js
+credentials.json
+
+# Cache and data files
+jobIds_cache.json
+*.cache
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
 *.log
-.DS_Store
-*.json.bak
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Source code (sensitive)
 *.lua
+PetFinderBot.lua
+PetFinderGUI.lua
+example-lua-usage.lua
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# IDE files
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Build and temp files
+dist/
+build/
+tmp/
+temp/
+*.tmp
+*.bak
+*.backup
+*.json.bak
+
+# Sensitive documentation
+*_secrets.md
+*_credentials.md
+*_config.md
