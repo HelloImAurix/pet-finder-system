@@ -58,6 +58,5 @@ local API_KEY = "user-luarmor-license-key"  -- User's license key
 
 ## ⚠️ Important
 
-- **Whitelist Railway IP** in LuArmor dashboard for API access
 - Set environment variables in Railway (not in code)
 - Update `API_URL` in bot script with your Railway URL
