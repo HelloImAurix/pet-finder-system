@@ -15,57 +15,6 @@ pcall(function()
 end)
 
 local API_URL = "https://empathetic-transformation-production.up.railway.app/api/finds/recent"
-local VERIFY_URL = "https://empathetic-transformation-production.up.railway.app/api/verify-key"
-
--- Key storage file path
-local KEY_FILE = "luji_hub_key.txt"
-
--- LuArmor Key (will be obfuscated by LuArmor)
-local LUARMOR_KEY = nil
-local KEY_VERIFIED = false
-
--- Function to save key to file
-local function saveKey(key)
-    if writefile then
-        pcall(function()
-            writefile(KEY_FILE, key)
-        end)
-    elseif isfile then
-        pcall(function()
-            if isfile(KEY_FILE) then
-                writefile(KEY_FILE, key)
-            else
-                writefile(KEY_FILE, key)
-            end
-        end)
-    end
-end
-
--- Function to load key from file
-local function loadKey()
-    if readfile and isfile then
-        local success, key = pcall(function()
-            if isfile(KEY_FILE) then
-                return readfile(KEY_FILE)
-            end
-        end)
-        if success and key and key ~= "" then
-            return key
-        end
-    end
-    return nil
-end
-
--- Function to delete saved key
-local function deleteKey()
-    if delfile then
-        pcall(function()
-            if isfile and isfile(KEY_FILE) then
-                delfile(KEY_FILE)
-            end
-        end)
-    end
-end
 
 -- Luji Hub Colors (matching sabLujiHub.lua)
 local Colors = {
@@ -269,109 +218,6 @@ UserInputService.InputEnded:Connect(function(input)
     end
 end)
 
--- Key Input Frame (shown when key is not verified)
-local KeyInputFrame = Instance.new("Frame")
-KeyInputFrame.Size = UDim2.new(1, -20, 0, 120)
-KeyInputFrame.Position = UDim2.new(0, 10, 0, 50)
-KeyInputFrame.BackgroundColor3 = Colors.Secondary
-KeyInputFrame.BorderSizePixel = 0
-KeyInputFrame.Visible = false
-KeyInputFrame.Parent = MainFrame
-
-local KeyInputCorner = Instance.new("UICorner")
-KeyInputCorner.CornerRadius = UDim.new(0, 8)
-KeyInputCorner.Parent = KeyInputFrame
-
-local KeyInputStroke = Instance.new("UIStroke")
-KeyInputStroke.Color = Colors.PurpleGlow
-KeyInputStroke.Thickness = 1.5
-KeyInputStroke.Transparency = 0.3
-KeyInputStroke.Parent = KeyInputFrame
-
-local KeyLabel = Instance.new("TextLabel")
-KeyLabel.Size = UDim2.new(1, -12, 0, isMobile and 22 or 25)
-KeyLabel.Position = UDim2.new(0, 6, 0, 6)
-KeyLabel.BackgroundTransparency = 1
-KeyLabel.Text = "Enter LuArmor Key:"
-KeyLabel.TextColor3 = Colors.Text
-KeyLabel.TextSize = isMobile and 12 or 13
-KeyLabel.Font = Enum.Font.GothamBold
-KeyLabel.TextXAlignment = Enum.TextXAlignment.Left
-KeyLabel.Parent = KeyInputFrame
-
-local KeyTextBox = Instance.new("TextBox")
-KeyTextBox.Size = UDim2.new(1, -12, 0, isMobile and 32 or 35)
-KeyTextBox.Position = UDim2.new(0, 6, 0, isMobile and 32 or 35)
-KeyTextBox.BackgroundColor3 = Colors.Background
-KeyTextBox.TextColor3 = Colors.Text
-KeyTextBox.TextSize = isMobile and 11 or 12
-KeyTextBox.Font = Enum.Font.Gotham
-KeyTextBox.PlaceholderText = "Paste your LuArmor key here..."
-KeyTextBox.PlaceholderColor3 = Colors.TextSecondary
-KeyTextBox.ClearTextOnFocus = false
-KeyTextBox.Text = ""
-KeyTextBox.Parent = KeyInputFrame
-
-local KeyTextBoxCorner = Instance.new("UICorner")
-KeyTextBoxCorner.CornerRadius = UDim.new(0, 6)
-KeyTextBoxCorner.Parent = KeyTextBox
-
-local KeyTextBoxPadding = Instance.new("UIPadding")
-KeyTextBoxPadding.PaddingLeft = UDim.new(0, 8)
-KeyTextBoxPadding.PaddingRight = UDim.new(0, 8)
-KeyTextBoxPadding.Parent = KeyTextBox
-
-local VerifyButton = Instance.new("TextButton")
-VerifyButton.Size = UDim2.new(1, -12, 0, isMobile and 28 or 30)
-VerifyButton.Position = UDim2.new(0, 6, 0, isMobile and 72 or 78)
-VerifyButton.BackgroundColor3 = Colors.Button
-VerifyButton.Text = "VERIFY KEY"
-VerifyButton.TextColor3 = Colors.Text
-VerifyButton.TextSize = isMobile and 10 or 11
-VerifyButton.Font = Enum.Font.GothamBold
-VerifyButton.BorderSizePixel = 0
-VerifyButton.AutoButtonColor = false
-VerifyButton.Parent = KeyInputFrame
-
-local VerifyButtonCorner = Instance.new("UICorner")
-VerifyButtonCorner.CornerRadius = UDim.new(0, 6)
-VerifyButtonCorner.Parent = VerifyButton
-
-local VerifyButtonStroke = Instance.new("UIStroke")
-VerifyButtonStroke.Color = Colors.PurpleGlow
-VerifyButtonStroke.Thickness = 1.5
-VerifyButtonStroke.Transparency = 0.3
-VerifyButtonStroke.Parent = VerifyButton
-
-VerifyButton.MouseEnter:Connect(function()
-    TweenService:Create(VerifyButton, TweenInfo.new(0.2), {
-        BackgroundColor3 = Colors.ButtonHover,
-    }):Play()
-    TweenService:Create(VerifyButtonStroke, TweenInfo.new(0.2), {
-        Transparency = 0,
-    }):Play()
-end)
-
-VerifyButton.MouseLeave:Connect(function()
-    TweenService:Create(VerifyButton, TweenInfo.new(0.2), {
-        BackgroundColor3 = Colors.Button,
-    }):Play()
-    TweenService:Create(VerifyButtonStroke, TweenInfo.new(0.2), {
-        Transparency = 0.3,
-    }):Play()
-end)
-
-local StatusLabel = Instance.new("TextLabel")
-StatusLabel.Size = UDim2.new(1, -12, 0, isMobile and 18 or 20)
-StatusLabel.Position = UDim2.new(0, 6, 1, -(isMobile and 22 or 25))
-StatusLabel.BackgroundTransparency = 1
-StatusLabel.Text = ""
-StatusLabel.TextColor3 = Colors.TextSecondary
-StatusLabel.TextSize = isMobile and 9 or 10
-StatusLabel.Font = Enum.Font.Gotham
-StatusLabel.TextXAlignment = Enum.TextXAlignment.Left
-StatusLabel.Parent = KeyInputFrame
-
 -- Scroll Frame for finds
 local ScrollFrame = Instance.new("ScrollingFrame")
 ScrollFrame.Size = UDim2.new(1, -10, 1, -45)
@@ -531,82 +377,8 @@ local function createCard(find)
     return card
 end
 
--- Function to verify LuArmor key
-local function verifyKey(key)
-    if not key or key == "" then
-        return false, "Key cannot be empty"
-    end
-    
-    local success, response, statusCode = pcall(function()
-        if syn and syn.request then
-            local res = syn.request({
-                Url = VERIFY_URL,
-                Method = "POST",
-                Headers = {
-                    ["Content-Type"] = "application/json",
-                    ["X-API-Key"] = key
-                },
-                Body = HttpService:JSONEncode({key = key, user_key = key})
-            })
-            return res.Body, res.StatusCode
-        elseif request then
-            local res = request({
-                Url = VERIFY_URL,
-                Method = "POST",
-                Headers = {
-                    ["Content-Type"] = "application/json",
-                    ["X-API-Key"] = key
-                },
-                Body = HttpService:JSONEncode({key = key, user_key = key})
-            })
-            return res.Body, res.StatusCode
-        else
-            local response = HttpService:PostAsync(VERIFY_URL, HttpService:JSONEncode({key = key, user_key = key}), Enum.HttpContentType.ApplicationJson, false, {
-                ["X-API-Key"] = key
-            })
-            return response, 200
-        end
-    end)
-    
-    if success and response then
-        -- Check if response is HTML (error page)
-        if type(response) == "string" and (response:sub(1, 1) == "<" or response:find("<!DOCTYPE") or response:find("<html")) then
-            return false, "Server returned HTML instead of JSON. Check server status."
-        end
-        
-        local success2, data = pcall(function()
-            return HttpService:JSONDecode(response)
-        end)
-        
-        if success2 and data then
-            if data.success then
-                return true, "Key verified successfully"
-            else
-                return false, data.error or "Key verification failed"
-            end
-        else
-            -- Try to extract error message from response
-            local errorMsg = "Invalid response from server"
-            if type(response) == "string" and #response < 200 then
-                errorMsg = "Server error: " .. response:sub(1, 100)
-            end
-            return false, errorMsg
-        end
-    else
-        local errorMsg = "Failed to connect to server"
-        if response and type(response) == "string" then
-            errorMsg = errorMsg .. ": " .. response:sub(1, 100)
-        end
-        return false, errorMsg
-    end
-end
-
 -- Function to fetch and display finds
 local function fetchFinds()
-    -- Only fetch if key is verified
-    if not KEY_VERIFIED or not LUARMOR_KEY then
-        return
-    end
     local success, response = pcall(function()
         if syn and syn.request then
             local res = syn.request({
@@ -655,129 +427,21 @@ local function fetchFinds()
     end
 end
 
--- Verify button click
-VerifyButton.MouseButton1Click:Connect(function()
-    local key = KeyTextBox.Text
-    if key == "" then
-        StatusLabel.Text = "Please enter a key"
-        StatusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
-        return
-    end
-    
-    VerifyButton.Text = "VERIFYING..."
-    VerifyButton.BackgroundColor3 = Color3.fromRGB(255, 165, 0)
-    StatusLabel.Text = "Verifying key..."
-    StatusLabel.TextColor3 = Colors.TextSecondary
-    
-    task.spawn(function()
-        local verified, message = verifyKey(key)
-        
-        if verified then
-            LUARMOR_KEY = key
-            KEY_VERIFIED = true
-            saveKey(key) -- Save the key
-            KeyInputFrame.Visible = false
-            ScrollFrame.Visible = true
-            TitleLabel.Text = "Luji Hub | Auto Joiner"
-            StatusLabel.Text = ""
-            
-            -- Start fetching finds
-            task.spawn(function()
-                while ScreenGui.Parent and KEY_VERIFIED do
-                    fetchFinds()
-                    task.wait(1)
-                end
-            end)
-            
-            -- Initial fetch
-            task.wait(0.1)
-            fetchFinds()
-        else
-            VerifyButton.Text = "VERIFY KEY"
-            VerifyButton.BackgroundColor3 = Colors.Accent
-            StatusLabel.Text = "Error: " .. message
-            StatusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
-            deleteKey() -- Delete invalid key
-        end
-    end)
-end)
-
--- Enter key to verify
-KeyTextBox.FocusLost:Connect(function(enterPressed)
-    if enterPressed then
-        VerifyButton.MouseButton1Click:Fire()
+-- Start fetching finds on startup
+ScrollFrame.Visible = true
+task.spawn(function()
+    while ScreenGui.Parent do
+        fetchFinds()
+        task.wait(1)
     end
 end)
 
--- Try to load saved key on startup
-local savedKey = loadKey()
-if savedKey then
-    KeyInputFrame.Visible = true
-    ScrollFrame.Visible = false
-    KeyTextBox.Text = savedKey
-    StatusLabel.Text = "Auto-verifying saved key..."
-    StatusLabel.TextColor3 = Colors.TextSecondary
-    
-    -- Auto-verify saved key
-    task.spawn(function()
-        task.wait(0.5)
-        local verified, message = verifyKey(savedKey)
-        
-        if verified then
-            LUARMOR_KEY = savedKey
-            KEY_VERIFIED = true
-            KeyInputFrame.Visible = false
-            ScrollFrame.Visible = true
-            TitleLabel.Text = "Luji Hub | Auto Joiner"
-            StatusLabel.Text = ""
-            
-            -- Start fetching finds
-            task.spawn(function()
-                while ScreenGui.Parent and KEY_VERIFIED do
-                    fetchFinds()
-                    task.wait(1)
-                end
-            end)
-            
-            -- Initial fetch
-            task.wait(0.1)
-            fetchFinds()
-        else
-            KeyTextBox.Text = ""
-            StatusLabel.Text = "Saved key invalid. Please enter a new key."
-            StatusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
-            deleteKey() -- Remove invalid saved key
-        end
-    end)
-else
-    -- Show key input on startup if no saved key
-    KeyInputFrame.Visible = true
-    ScrollFrame.Visible = false
-end
+-- Initial fetch
+task.wait(0.5)
+fetchFinds()
 
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
     if not gameProcessed and input.KeyCode == Enum.KeyCode.LeftControl then
         ScreenGui.Enabled = not ScreenGui.Enabled
-    end
-end)
-
--- Periodic key re-verification (every 5 minutes)
-task.spawn(function()
-    while ScreenGui.Parent do
-        task.wait(300) -- 5 minutes
-        if KEY_VERIFIED and LUARMOR_KEY then
-            local verified, _ = verifyKey(LUARMOR_KEY)
-            if not verified then
-                KEY_VERIFIED = false
-                LUARMOR_KEY = nil
-                KeyInputFrame.Visible = true
-                ScrollFrame.Visible = false
-                KeyTextBox.Text = ""
-                TitleLabel.Text = "Luji Hub | Auto Joiner"
-                StatusLabel.Text = "Key expired or invalid. Please re-enter."
-                StatusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
-                deleteKey() -- Remove expired key
-            end
-        end
     end
 end)
