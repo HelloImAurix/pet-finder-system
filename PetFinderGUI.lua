@@ -268,7 +268,7 @@ WaitingLabel2.TextWrapped = true
 WaitingLabel2.Parent = WaitingFrame
 
 local ListLayout = Instance.new("UIListLayout")
-ListLayout.Padding = UDim.new(0, 6)
+ListLayout.Padding = UDim.new(0, 4)
 ListLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
 ListLayout.SortOrder = Enum.SortOrder.LayoutOrder
 ListLayout.Parent = ScrollFrame
@@ -299,7 +299,7 @@ end)
 
 -- Function to create a card for a find
 local function createCard(find)
-    local CARD_HEIGHT = isMobile and 80 or 85
+    local CARD_HEIGHT = isMobile and 60 or 64
     local card = Instance.new("Frame")
     card.Size = UDim2.new(1, -8, 0, CARD_HEIGHT)
     card.BackgroundColor3 = Colors.Secondary
@@ -335,7 +335,7 @@ local function createCard(find)
     -- Generation and MPS
     local genLabel = Instance.new("TextLabel")
     genLabel.Size = UDim2.new(1, -(BUTTON_WIDTH + 12), 0, isMobile and 18 or 20)
-    genLabel.Position = UDim2.new(0, 6, 0, isMobile and 28 or 30)
+    genLabel.Position = UDim2.new(0, 6, 0, isMobile and 22 or 25)
     genLabel.BackgroundTransparency = 1
     genLabel.Text = "Gen: " .. (find.generation or "N/A") .. " | MPS: " .. (find.mps or 0)
     genLabel.TextColor3 = Colors.TextSecondary
@@ -348,7 +348,7 @@ local function createCard(find)
     -- Account and players
     local infoLabel = Instance.new("TextLabel")
     infoLabel.Size = UDim2.new(1, -(BUTTON_WIDTH + 12), 0, isMobile and 16 or 18)
-    infoLabel.Position = UDim2.new(0, 6, 0, isMobile and 48 or 52)
+    infoLabel.Position = UDim2.new(0, 6, 0, isMobile and 40 or 44)
     infoLabel.BackgroundTransparency = 1
     infoLabel.Text = "👤 " .. (find.accountName or "Unknown") .. " | 👥 " .. (find.playerCount or 0) .. "/" .. (find.maxPlayers or 6)
     infoLabel.TextColor3 = Colors.TextSecondary
@@ -406,10 +406,21 @@ local function createCard(find)
         if find.placeId and find.jobId then
             joinButton.Text = "JOINING..."
             joinButton.BackgroundColor3 = Color3.fromRGB(255, 165, 0)
-            TeleportService:Teleport(tonumber(find.placeId), LocalPlayer, {find.jobId})
-            task.wait(1.5)
-            joinButton.Text = "JOIN"
-            joinButton.BackgroundColor3 = Colors.Green
+            local placeId = tonumber(find.placeId)
+            local jobId = tostring(find.jobId)
+            if placeId and jobId then
+                local success, err = pcall(function()
+                    TeleportService:TeleportToPlaceInstance(placeId, jobId, LocalPlayer)
+                end)
+                if not success then
+                    warn("Teleport failed:", err)
+                    joinButton.Text = "FAILED"
+                    joinButton.BackgroundColor3 = Color3.fromRGB(220, 50, 50)
+                    task.wait(1.5)
+                    joinButton.Text = "JOIN"
+                    joinButton.BackgroundColor3 = Colors.Green
+                end
+            end
         end
     end)
     
