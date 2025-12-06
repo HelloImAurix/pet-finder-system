@@ -497,13 +497,6 @@ ContentLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
 ContentLayout.SortOrder = Enum.SortOrder.LayoutOrder
 ContentLayout.Parent = ContentFrame
 
-MinMPSValue:GetPropertyChangedSignal("Value"):Connect(function()
-    if #cachedFinds > 0 then
-        filterAndDisplayFinds()
-    else
-        updatePetInfo()
-    end
-end)
 
 local ContentPadding = Instance.new("UIPadding")
 ContentPadding.PaddingLeft = UDim.new(0, 4)
