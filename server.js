@@ -3,10 +3,6 @@
 
 const express = require('express');
 const cors = require('cors');
-const fs = require('fs');
-const path = require('path');
-const http = require('http');
-const https = require('https');
 
 const app = express();
 const PORT = process.env.PORT || 3000; // Use environment variable for hosting
