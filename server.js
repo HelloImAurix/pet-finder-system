@@ -90,6 +90,9 @@ app.post('/api/pet-found', rateLimit, (req, res) => {
         }
         
         console.log(`[API] Received batch of ${addedCount} pet finds from ${accountName}`);
+        if (addedCount > 0) {
+            console.log(`[API] Sample find - petName: ${petFinds[0].petName}, mps: ${petFinds[0].mps}, placeId: ${petFinds[0].placeId}, jobId: ${petFinds[0].jobId}`);
+        }
         
         res.status(200).json({ 
             success: true, 
@@ -106,6 +109,7 @@ app.get('/api/finds', (req, res) => {
     try {
         const limit = parseInt(req.query.limit) || 50;
         const finds = petFinds.slice(0, limit);
+        console.log(`[API] /api/finds requested - returning ${finds.length} finds (total: ${petFinds.length})`);
         res.json({ success: true, finds: finds, total: petFinds.length });
     } catch (error) {
         console.error('[API] Error:', error);
@@ -115,18 +119,36 @@ app.get('/api/finds', (req, res) => {
 
 app.get('/api/finds/recent', rateLimit, (req, res) => {
     try {
+        // Use receivedAt (when server received it) for filtering - more reliable
         const tenMinutesAgo = Date.now() - (10 * 60 * 1000);
         const recent = petFinds.filter(find => {
-            const findTime = new Date(find.receivedAt || find.timestamp * 1000).getTime();
-            return findTime > tenMinutesAgo;
+            if (find.receivedAt) {
+                // receivedAt is ISO string - use this as it's set when server receives the data
+                const findTime = new Date(find.receivedAt).getTime();
+                return findTime > tenMinutesAgo;
+            }
+            // Fallback to timestamp if receivedAt is missing
+            if (find.timestamp) {
+                const ts = typeof find.timestamp === 'number' ? find.timestamp : parseInt(find.timestamp);
+                const findTime = ts < 10000000000 ? ts * 1000 : ts;
+                return findTime > tenMinutesAgo;
+            }
+            // If no timestamp at all, include it (shouldn't happen)
+            return true;
         });
         
-        console.log(`[API] Total finds in storage: ${petFinds.length}, Recent (last 10min): ${recent.length}`);
+        console.log(`[API] /api/finds/recent - Total finds: ${petFinds.length}, Recent (last 10min): ${recent.length}`);
         if (recent.length > 0) {
-            console.log(`[API] First find - placeId: ${recent[0].placeId}, jobId: ${recent[0].jobId}, petName: ${recent[0].petName}`);
+            console.log(`[API] First find - petName: ${recent[0].petName}, mps: ${recent[0].mps}, placeId: ${recent[0].placeId}, jobId: ${recent[0].jobId}`);
         } else if (petFinds.length > 0) {
             const oldestFind = petFinds[petFinds.length - 1];
-            const oldestTime = new Date(oldestFind.receivedAt || oldestFind.timestamp * 1000).getTime();
+            let oldestTime = Date.now();
+            if (oldestFind.receivedAt) {
+                oldestTime = new Date(oldestFind.receivedAt).getTime();
+            } else if (oldestFind.timestamp) {
+                const ts = typeof oldestFind.timestamp === 'number' ? oldestFind.timestamp : parseInt(oldestFind.timestamp);
+                oldestTime = ts < 10000000000 ? ts * 1000 : ts;
+            }
             const ageMinutes = Math.floor((Date.now() - oldestTime) / (60 * 1000));
             console.log(`[API] All finds are older than 10 minutes. Oldest find is ${ageMinutes} minutes old.`);
         } else {
@@ -152,6 +174,19 @@ app.get('/api/health', (req, res) => {
         totalFinds: petFinds.length,
         uptime: process.uptime()
     });
+});
+
+// Debug endpoint to see all finds (not filtered by time)
+app.get('/api/finds/all', (req, res) => {
+    try {
+        const limit = parseInt(req.query.limit) || 100;
+        const finds = petFinds.slice(0, limit);
+        console.log(`[API] /api/finds/all - returning ${finds.length} finds (total: ${petFinds.length})`);
+        res.json({ success: true, finds: finds, total: petFinds.length });
+    } catch (error) {
+        console.error('[API] Error:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
 });
 
 // Job ID endpoints for server hopping
