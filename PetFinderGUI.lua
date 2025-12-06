@@ -65,21 +65,50 @@ local function deleteKey()
     end
 end
 
--- Luji Hub Colors
+-- Luji Hub Colors (matching sabLujiHub.lua)
 local Colors = {
-    Background = Color3.fromRGB(15, 15, 25),
+    Background = Color3.fromRGB(25, 25, 30),
     Secondary = Color3.fromRGB(35, 35, 40),
-    Accent = Color3.fromRGB(0, 162, 255),
-    AccentHover = Color3.fromRGB(50, 200, 255),
+    Accent = Color3.fromRGB(175, 82, 222),
+    AccentHover = Color3.fromRGB(200, 100, 255),
     Text = Color3.fromRGB(255, 255, 255),
     TextSecondary = Color3.fromRGB(200, 200, 200),
-    Purple = Color3.fromRGB(180, 120, 255),
-    PurpleGlow = Color3.fromRGB(100, 50, 200),
-    TitleBar = Color3.fromRGB(25, 15, 45),
+    TabInactive = Color3.fromRGB(40, 40, 45),
+    TabActive = Color3.fromRGB(175, 82, 222),
     Button = Color3.fromRGB(45, 45, 50),
-    ButtonHover = Color3.fromRGB(55, 55, 60),
+    ButtonHover = Color3.fromRGB(60, 50, 70),
+    ToggleOff = Color3.fromRGB(76, 42, 97),
+    ToggleOn = Color3.fromRGB(138, 43, 226),
+    CloseButton = Color3.fromRGB(220, 50, 50),
+    CloseButtonHover = Color3.fromRGB(255, 70, 70),
+    PurpleGlow = Color3.fromRGB(175, 82, 222),
     Green = Color3.fromRGB(76, 175, 80),
 }
+
+local isMobile = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+
+local function getViewportSize()
+    local camera = Workspace.CurrentCamera
+    if camera and camera.ViewportSize then
+        return camera.ViewportSize
+    end
+    return Vector2.new(1920, 1080)
+end
+
+local viewportSize = getViewportSize()
+Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+    viewportSize = getViewportSize()
+end)
+if Workspace.CurrentCamera then
+    Workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(function()
+        viewportSize = getViewportSize()
+    end)
+end
+
+local MOBILE_WIDTH = math.min(viewportSize.X * 0.85, 340)
+local MOBILE_HEIGHT = math.min(viewportSize.Y * 0.8, 285)
+local WIDTH = isMobile and MOBILE_WIDTH or 340
+local HEIGHT = isMobile and MOBILE_HEIGHT or 285
 
 -- Create GUI
 local ScreenGui = Instance.new("ScreenGui")
@@ -89,48 +118,154 @@ ScreenGui.ResetOnSpawn = false
 ScreenGui.Parent = CoreGui
 
 local MainFrame = Instance.new("Frame")
-MainFrame.Size = UDim2.new(0, 400, 0, 500)
-MainFrame.Position = UDim2.new(0.5, -200, 0.5, -250)
+MainFrame.Name = "MainFrame"
+MainFrame.Size = UDim2.new(0, WIDTH, 0, HEIGHT)
+MainFrame.Position = UDim2.new(0.5, -WIDTH / 2, 0.5, -HEIGHT / 2)
 MainFrame.BackgroundColor3 = Colors.Background
-MainFrame.BackgroundTransparency = 0.1
 MainFrame.BorderSizePixel = 0
-MainFrame.Active = true
-MainFrame.Draggable = true
 MainFrame.Parent = ScreenGui
 
+local ShadowFrame = Instance.new("Frame")
+ShadowFrame.Name = "Shadow"
+ShadowFrame.Size = UDim2.new(1, 6, 1, 6)
+ShadowFrame.Position = UDim2.new(0, -3, 0, -3)
+ShadowFrame.BackgroundColor3 = Color3.new(0, 0, 0)
+ShadowFrame.BackgroundTransparency = 0.7
+ShadowFrame.BorderSizePixel = 0
+ShadowFrame.ZIndex = -1
+ShadowFrame.Parent = MainFrame
+
+local ShadowCorner = Instance.new("UICorner")
+ShadowCorner.CornerRadius = UDim.new(0, 13)
+ShadowCorner.Parent = ShadowFrame
+
 local UICorner = Instance.new("UICorner")
-UICorner.CornerRadius = UDim.new(0, 15)
+UICorner.CornerRadius = UDim.new(0, 10)
 UICorner.Parent = MainFrame
 
 local UIStroke = Instance.new("UIStroke")
-UIStroke.Color = Colors.PurpleGlow
-UIStroke.Thickness = 2
-UIStroke.Transparency = 0.3
+UIStroke.Color = Colors.Accent
+UIStroke.Thickness = isMobile and 1.5 or 2
+UIStroke.Transparency = 0.2
 UIStroke.Parent = MainFrame
 
--- Title Bar
-local TitleBar = Instance.new("Frame")
-TitleBar.Size = UDim2.new(1, 0, 0, 35)
-TitleBar.Position = UDim2.new(0, 0, 0, 0)
-TitleBar.BackgroundColor3 = Colors.TitleBar
-TitleBar.BackgroundTransparency = 0.1
-TitleBar.BorderSizePixel = 0
-TitleBar.Parent = MainFrame
+local HEADER_HEIGHT = isMobile and 28 or 30
+local HeaderFrame = Instance.new("Frame")
+HeaderFrame.Size = UDim2.new(1, 0, 0, HEADER_HEIGHT)
+HeaderFrame.BackgroundColor3 = Colors.Secondary
+HeaderFrame.BorderSizePixel = 0
+HeaderFrame.Parent = MainFrame
 
-local TitleBarCorner = Instance.new("UICorner")
-TitleBarCorner.CornerRadius = UDim.new(0, 15)
-TitleBarCorner.Parent = TitleBar
+local HeaderCorner = Instance.new("UICorner")
+HeaderCorner.CornerRadius = UDim.new(0, 10)
+HeaderCorner.Parent = HeaderFrame
 
-local Title = Instance.new("TextLabel")
-Title.Size = UDim2.new(1, 0, 1, 0)
-Title.BackgroundTransparency = 1
-Title.Text = "LUJI HUB AUTO JOINER"
-Title.Font = Enum.Font.GothamBold
-Title.TextSize = 18
-Title.TextColor3 = Colors.Purple
-Title.TextStrokeTransparency = 0.7
-Title.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
-Title.Parent = TitleBar
+local HeaderMask = Instance.new("Frame")
+HeaderMask.Size = UDim2.new(1, 0, 0, 10)
+HeaderMask.Position = UDim2.new(0, 0, 1, -10)
+HeaderMask.BackgroundColor3 = Colors.Secondary
+HeaderMask.BorderSizePixel = 0
+HeaderMask.Parent = HeaderFrame
+
+local TitleLabel = Instance.new("TextLabel")
+TitleLabel.Size = UDim2.new(0, 200, 0, HEADER_HEIGHT)
+TitleLabel.Position = UDim2.new(0, 10, 0, 0)
+TitleLabel.BackgroundTransparency = 1
+TitleLabel.Text = "Luji Hub | Auto Joiner"
+TitleLabel.TextColor3 = Colors.Accent
+TitleLabel.TextSize = isMobile and 12 or 13
+TitleLabel.Font = Enum.Font.GothamBold
+TitleLabel.TextXAlignment = Enum.TextXAlignment.Left
+TitleLabel.Parent = HeaderFrame
+
+local CloseButton = Instance.new("TextButton")
+CloseButton.Size = UDim2.new(0, HEADER_HEIGHT - 2, 0, HEADER_HEIGHT - 2)
+CloseButton.Position = UDim2.new(1, -(HEADER_HEIGHT + 2), 0, 1)
+CloseButton.BackgroundColor3 = Colors.CloseButton
+CloseButton.Text = "×"
+CloseButton.TextColor3 = Colors.Text
+CloseButton.TextSize = isMobile and 20 or 18
+CloseButton.Font = Enum.Font.GothamBold
+CloseButton.BorderSizePixel = 0
+CloseButton.AutoButtonColor = false
+CloseButton.Parent = HeaderFrame
+
+local CloseCorner = Instance.new("UICorner")
+CloseCorner.CornerRadius = UDim.new(0, 5)
+CloseCorner.Parent = CloseButton
+
+CloseButton.MouseEnter:Connect(function()
+    CloseButton.BackgroundColor3 = Colors.CloseButtonHover
+end)
+CloseButton.MouseLeave:Connect(function()
+    CloseButton.BackgroundColor3 = Colors.CloseButton
+end)
+CloseButton.MouseButton1Click:Connect(function()
+    ScreenGui.Enabled = not ScreenGui.Enabled
+end)
+
+local dragging = false
+local dragStart = nil
+local startPos = nil
+local dragInput = nil
+local hasMoved = false
+
+local function update(input)
+    if not dragging or not dragStart or not startPos then return end
+    if not MainFrame or not MainFrame.Parent then return end
+
+    local delta = input.Position - dragStart
+    if math.abs(delta.X) > 2 or math.abs(delta.Y) > 2 then
+        hasMoved = true
+    end
+    if not hasMoved then return end
+
+    local newX = startPos.X.Offset + delta.X
+    local newY = startPos.Y.Offset + delta.Y
+    newX = math.clamp(newX, 0, viewportSize.X - WIDTH)
+    newY = math.clamp(newY, 0, viewportSize.Y - HEIGHT)
+    MainFrame.Position = UDim2.new(0, newX, 0, newY)
+end
+
+HeaderFrame.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+        hasMoved = false
+        dragStart = input.Position
+        startPos = MainFrame.Position
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                dragging = false
+                dragStart = nil
+                startPos = nil
+                dragInput = nil
+                hasMoved = false
+            end
+        end)
+    end
+end)
+
+HeaderFrame.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+        dragInput = input
+    end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+    if input == dragInput and dragging then
+        update(input)
+    end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+    if (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) and dragging then
+        dragging = false
+        dragStart = nil
+        startPos = nil
+        dragInput = nil
+        hasMoved = false
+    end
+end)
 
 -- Key Input Frame (shown when key is not verified)
 local KeyInputFrame = Instance.new("Frame")
@@ -152,22 +287,22 @@ KeyInputStroke.Transparency = 0.3
 KeyInputStroke.Parent = KeyInputFrame
 
 local KeyLabel = Instance.new("TextLabel")
-KeyLabel.Size = UDim2.new(1, -20, 0, 25)
-KeyLabel.Position = UDim2.new(0, 10, 0, 10)
+KeyLabel.Size = UDim2.new(1, -12, 0, isMobile and 22 or 25)
+KeyLabel.Position = UDim2.new(0, 6, 0, 6)
 KeyLabel.BackgroundTransparency = 1
 KeyLabel.Text = "Enter LuArmor Key:"
 KeyLabel.TextColor3 = Colors.Text
-KeyLabel.TextSize = 14
+KeyLabel.TextSize = isMobile and 12 or 13
 KeyLabel.Font = Enum.Font.GothamBold
 KeyLabel.TextXAlignment = Enum.TextXAlignment.Left
 KeyLabel.Parent = KeyInputFrame
 
 local KeyTextBox = Instance.new("TextBox")
-KeyTextBox.Size = UDim2.new(1, -20, 0, 35)
-KeyTextBox.Position = UDim2.new(0, 10, 0, 40)
-KeyTextBox.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+KeyTextBox.Size = UDim2.new(1, -12, 0, isMobile and 32 or 35)
+KeyTextBox.Position = UDim2.new(0, 6, 0, isMobile and 32 or 35)
+KeyTextBox.BackgroundColor3 = Colors.Background
 KeyTextBox.TextColor3 = Colors.Text
-KeyTextBox.TextSize = 12
+KeyTextBox.TextSize = isMobile and 11 or 12
 KeyTextBox.Font = Enum.Font.Gotham
 KeyTextBox.PlaceholderText = "Paste your LuArmor key here..."
 KeyTextBox.PlaceholderColor3 = Colors.TextSecondary
@@ -180,17 +315,17 @@ KeyTextBoxCorner.CornerRadius = UDim.new(0, 6)
 KeyTextBoxCorner.Parent = KeyTextBox
 
 local KeyTextBoxPadding = Instance.new("UIPadding")
-KeyTextBoxPadding.PaddingLeft = UDim.new(0, 10)
-KeyTextBoxPadding.PaddingRight = UDim.new(0, 10)
+KeyTextBoxPadding.PaddingLeft = UDim.new(0, 8)
+KeyTextBoxPadding.PaddingRight = UDim.new(0, 8)
 KeyTextBoxPadding.Parent = KeyTextBox
 
 local VerifyButton = Instance.new("TextButton")
-VerifyButton.Size = UDim2.new(1, -20, 0, 30)
-VerifyButton.Position = UDim2.new(0, 10, 0, 82)
-VerifyButton.BackgroundColor3 = Colors.Accent
+VerifyButton.Size = UDim2.new(1, -12, 0, isMobile and 28 or 30)
+VerifyButton.Position = UDim2.new(0, 6, 0, isMobile and 72 or 78)
+VerifyButton.BackgroundColor3 = Colors.Button
 VerifyButton.Text = "VERIFY KEY"
 VerifyButton.TextColor3 = Colors.Text
-VerifyButton.TextSize = 12
+VerifyButton.TextSize = isMobile and 10 or 11
 VerifyButton.Font = Enum.Font.GothamBold
 VerifyButton.BorderSizePixel = 0
 VerifyButton.AutoButtonColor = false
@@ -200,13 +335,37 @@ local VerifyButtonCorner = Instance.new("UICorner")
 VerifyButtonCorner.CornerRadius = UDim.new(0, 6)
 VerifyButtonCorner.Parent = VerifyButton
 
+local VerifyButtonStroke = Instance.new("UIStroke")
+VerifyButtonStroke.Color = Colors.PurpleGlow
+VerifyButtonStroke.Thickness = 1.5
+VerifyButtonStroke.Transparency = 0.3
+VerifyButtonStroke.Parent = VerifyButton
+
+VerifyButton.MouseEnter:Connect(function()
+    TweenService:Create(VerifyButton, TweenInfo.new(0.2), {
+        BackgroundColor3 = Colors.ButtonHover,
+    }):Play()
+    TweenService:Create(VerifyButtonStroke, TweenInfo.new(0.2), {
+        Transparency = 0,
+    }):Play()
+end)
+
+VerifyButton.MouseLeave:Connect(function()
+    TweenService:Create(VerifyButton, TweenInfo.new(0.2), {
+        BackgroundColor3 = Colors.Button,
+    }):Play()
+    TweenService:Create(VerifyButtonStroke, TweenInfo.new(0.2), {
+        Transparency = 0.3,
+    }):Play()
+end)
+
 local StatusLabel = Instance.new("TextLabel")
-StatusLabel.Size = UDim2.new(1, -20, 0, 20)
-StatusLabel.Position = UDim2.new(0, 10, 1, -25)
+StatusLabel.Size = UDim2.new(1, -12, 0, isMobile and 18 or 20)
+StatusLabel.Position = UDim2.new(0, 6, 1, -(isMobile and 22 or 25))
 StatusLabel.BackgroundTransparency = 1
 StatusLabel.Text = ""
 StatusLabel.TextColor3 = Colors.TextSecondary
-StatusLabel.TextSize = 11
+StatusLabel.TextSize = isMobile and 9 or 10
 StatusLabel.Font = Enum.Font.Gotham
 StatusLabel.TextXAlignment = Enum.TextXAlignment.Left
 StatusLabel.Parent = KeyInputFrame
@@ -222,21 +381,40 @@ ScrollFrame.ScrollBarImageColor3 = Colors.Accent
 ScrollFrame.Parent = MainFrame
 
 local ListLayout = Instance.new("UIListLayout")
-ListLayout.Padding = UDim.new(0, 5)
+ListLayout.Padding = UDim.new(0, 6)
+ListLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
 ListLayout.SortOrder = Enum.SortOrder.LayoutOrder
 ListLayout.Parent = ScrollFrame
 
 local Padding = Instance.new("UIPadding")
-Padding.PaddingTop = UDim.new(0, 5)
-Padding.PaddingBottom = UDim.new(0, 5)
-Padding.PaddingLeft = UDim.new(0, 5)
-Padding.PaddingRight = UDim.new(0, 5)
+Padding.PaddingLeft = UDim.new(0, 4)
+Padding.PaddingRight = UDim.new(0, 4)
+Padding.PaddingTop = UDim.new(0, 4)
+Padding.PaddingBottom = UDim.new(0, 4)
 Padding.Parent = ScrollFrame
+
+local function updateCanvasSize()
+    if not ScrollFrame or not ScrollFrame.Parent then return end
+    local contentSize = ListLayout.AbsoluteContentSize
+    local padding = Padding.PaddingTop.Offset + Padding.PaddingBottom.Offset
+    ScrollFrame.CanvasSize = UDim2.new(0, 0, 0, contentSize.Y + padding + 8)
+end
+
+ListLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(updateCanvasSize)
+ScrollFrame:GetPropertyChangedSignal("AbsoluteSize"):Connect(updateCanvasSize)
+
+task.spawn(function()
+    while ScrollFrame and ScrollFrame.Parent do
+        updateCanvasSize()
+        task.wait(0.1)
+    end
+end)
 
 -- Function to create a card for a find
 local function createCard(find)
+    local CARD_HEIGHT = isMobile and 80 or 85
     local card = Instance.new("Frame")
-    card.Size = UDim2.new(1, -10, 0, 85)
+    card.Size = UDim2.new(1, -8, 0, CARD_HEIGHT)
     card.BackgroundColor3 = Colors.Secondary
     card.BorderSizePixel = 0
     card.Parent = ScrollFrame
@@ -248,56 +426,63 @@ local function createCard(find)
     local cardStroke = Instance.new("UIStroke")
     cardStroke.Color = Colors.PurpleGlow
     cardStroke.Thickness = 1.5
-    cardStroke.Transparency = 0.5
+    cardStroke.Transparency = 0.3
     cardStroke.Parent = card
+    
+    local BUTTON_WIDTH = isMobile and 55 or 60
+    local BUTTON_HEIGHT = isMobile and 30 or 32
     
     -- Pet name
     local nameLabel = Instance.new("TextLabel")
-    nameLabel.Size = UDim2.new(1, -75, 0, 25)
-    nameLabel.Position = UDim2.new(0, 10, 0, 5)
+    nameLabel.Size = UDim2.new(1, -(BUTTON_WIDTH + 12), 0, isMobile and 22 or 25)
+    nameLabel.Position = UDim2.new(0, 6, 0, 6)
     nameLabel.BackgroundTransparency = 1
     nameLabel.Text = "📦 " .. (find.petName or "Unknown")
     nameLabel.TextColor3 = Colors.Accent
-    nameLabel.TextSize = 14
+    nameLabel.TextSize = isMobile and 12 or 13
     nameLabel.Font = Enum.Font.GothamBold
     nameLabel.TextXAlignment = Enum.TextXAlignment.Left
+    nameLabel.TextTruncate = Enum.TextTruncate.AtEnd
     nameLabel.Parent = card
     
     -- Generation and MPS
     local genLabel = Instance.new("TextLabel")
-    genLabel.Size = UDim2.new(1, -75, 0, 20)
-    genLabel.Position = UDim2.new(0, 10, 0, 30)
+    genLabel.Size = UDim2.new(1, -(BUTTON_WIDTH + 12), 0, isMobile and 18 or 20)
+    genLabel.Position = UDim2.new(0, 6, 0, isMobile and 28 or 30)
     genLabel.BackgroundTransparency = 1
     genLabel.Text = "Gen: " .. (find.generation or "N/A") .. " | MPS: " .. (find.mps or 0)
     genLabel.TextColor3 = Colors.TextSecondary
-    genLabel.TextSize = 12
+    genLabel.TextSize = isMobile and 10 or 11
     genLabel.Font = Enum.Font.Gotham
     genLabel.TextXAlignment = Enum.TextXAlignment.Left
+    genLabel.TextTruncate = Enum.TextTruncate.AtEnd
     genLabel.Parent = card
     
     -- Account and players
     local infoLabel = Instance.new("TextLabel")
-    infoLabel.Size = UDim2.new(1, -75, 0, 18)
-    infoLabel.Position = UDim2.new(0, 10, 0, 52)
+    infoLabel.Size = UDim2.new(1, -(BUTTON_WIDTH + 12), 0, isMobile and 16 or 18)
+    infoLabel.Position = UDim2.new(0, 6, 0, isMobile and 48 or 52)
     infoLabel.BackgroundTransparency = 1
     infoLabel.Text = "👤 " .. (find.accountName or "Unknown") .. " | 👥 " .. (find.playerCount or 0) .. "/" .. (find.maxPlayers or 6)
     infoLabel.TextColor3 = Colors.TextSecondary
-    infoLabel.TextSize = 11
+    infoLabel.TextSize = isMobile and 9 or 10
     infoLabel.Font = Enum.Font.Gotham
     infoLabel.TextXAlignment = Enum.TextXAlignment.Left
+    infoLabel.TextTruncate = Enum.TextTruncate.AtEnd
     infoLabel.Parent = card
     
     -- Join button
     local joinButton = Instance.new("TextButton")
-    joinButton.Size = UDim2.new(0, 65, 0, 32)
-    joinButton.Position = UDim2.new(1, -70, 0.5, -16)
+    joinButton.Size = UDim2.new(0, BUTTON_WIDTH, 0, BUTTON_HEIGHT)
+    joinButton.Position = UDim2.new(1, -(BUTTON_WIDTH + 6), 0.5, -BUTTON_HEIGHT / 2)
     joinButton.BackgroundColor3 = Colors.Green
     joinButton.Text = "JOIN"
     joinButton.TextColor3 = Colors.Text
-    joinButton.TextSize = 12
+    joinButton.TextSize = isMobile and 10 or 11
     joinButton.Font = Enum.Font.GothamBold
     joinButton.BorderSizePixel = 0
     joinButton.AutoButtonColor = false
+    joinButton.ZIndex = 10
     joinButton.Parent = card
     
     local joinCorner = Instance.new("UICorner")
@@ -306,7 +491,7 @@ local function createCard(find)
     
     local joinStroke = Instance.new("UIStroke")
     joinStroke.Color = Colors.Accent
-    joinStroke.Thickness = 1
+    joinStroke.Thickness = 1.5
     joinStroke.Transparency = 0.3
     joinStroke.Parent = joinButton
     
@@ -314,14 +499,18 @@ local function createCard(find)
     joinButton.MouseEnter:Connect(function()
         TweenService:Create(joinButton, TweenInfo.new(0.2), {
             BackgroundColor3 = Color3.fromRGB(102, 187, 106),
-            Size = UDim2.new(0, 67, 0, 34)
+        }):Play()
+        TweenService:Create(joinStroke, TweenInfo.new(0.2), {
+            Transparency = 0,
         }):Play()
     end)
     
     joinButton.MouseLeave:Connect(function()
         TweenService:Create(joinButton, TweenInfo.new(0.2), {
             BackgroundColor3 = Colors.Green,
-            Size = UDim2.new(0, 65, 0, 32)
+        }):Play()
+        TweenService:Create(joinStroke, TweenInfo.new(0.2), {
+            Transparency = 0.3,
         }):Play()
     end)
     
@@ -472,7 +661,7 @@ VerifyButton.MouseButton1Click:Connect(function()
             saveKey(key) -- Save the key
             KeyInputFrame.Visible = false
             ScrollFrame.Visible = true
-            Title.Text = "LUJI HUB AUTO JOINER"
+            TitleLabel.Text = "Luji Hub | Auto Joiner"
             StatusLabel.Text = ""
             
             -- Start fetching finds
@@ -522,7 +711,7 @@ if savedKey then
             KEY_VERIFIED = true
             KeyInputFrame.Visible = false
             ScrollFrame.Visible = true
-            Title.Text = "LUJI HUB AUTO JOINER"
+            TitleLabel.Text = "Luji Hub | Auto Joiner"
             StatusLabel.Text = ""
             
             -- Start fetching finds
@@ -549,6 +738,12 @@ else
     ScrollFrame.Visible = false
 end
 
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if not gameProcessed and input.KeyCode == Enum.KeyCode.LeftControl then
+        ScreenGui.Enabled = not ScreenGui.Enabled
+    end
+end)
+
 -- Periodic key re-verification (every 5 minutes)
 task.spawn(function()
     while ScreenGui.Parent do
@@ -561,7 +756,7 @@ task.spawn(function()
                 KeyInputFrame.Visible = true
                 ScrollFrame.Visible = false
                 KeyTextBox.Text = ""
-                Title.Text = "LUJI HUB AUTO JOINER"
+                TitleLabel.Text = "Luji Hub | Auto Joiner"
                 StatusLabel.Text = "Key expired or invalid. Please re-enter."
                 StatusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
                 deleteKey() -- Remove expired key
