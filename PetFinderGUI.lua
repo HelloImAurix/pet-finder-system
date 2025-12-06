@@ -469,6 +469,7 @@ VerifyButton.MouseButton1Click:Connect(function()
         if verified then
             LUARMOR_KEY = key
             KEY_VERIFIED = true
+            saveKey(key) -- Save the key
             KeyInputFrame.Visible = false
             ScrollFrame.Visible = true
             Title.Text = "LUJI HUB AUTO JOINER"
@@ -490,6 +491,7 @@ VerifyButton.MouseButton1Click:Connect(function()
             VerifyButton.BackgroundColor3 = Colors.Accent
             StatusLabel.Text = "Error: " .. message
             StatusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+            deleteKey() -- Delete invalid key
         end
     end)
 end)
@@ -501,9 +503,51 @@ KeyTextBox.FocusLost:Connect(function(enterPressed)
     end
 end)
 
--- Show key input on startup
-KeyInputFrame.Visible = true
-ScrollFrame.Visible = false
+-- Try to load saved key on startup
+local savedKey = loadKey()
+if savedKey then
+    KeyInputFrame.Visible = true
+    ScrollFrame.Visible = false
+    KeyTextBox.Text = savedKey
+    StatusLabel.Text = "Auto-verifying saved key..."
+    StatusLabel.TextColor3 = Colors.TextSecondary
+    
+    -- Auto-verify saved key
+    task.spawn(function()
+        task.wait(0.5)
+        local verified, message = verifyKey(savedKey)
+        
+        if verified then
+            LUARMOR_KEY = savedKey
+            KEY_VERIFIED = true
+            KeyInputFrame.Visible = false
+            ScrollFrame.Visible = true
+            Title.Text = "LUJI HUB AUTO JOINER"
+            StatusLabel.Text = ""
+            
+            -- Start fetching finds
+            task.spawn(function()
+                while ScreenGui.Parent and KEY_VERIFIED do
+                    fetchFinds()
+                    task.wait(1)
+                end
+            end)
+            
+            -- Initial fetch
+            task.wait(0.1)
+            fetchFinds()
+        else
+            KeyTextBox.Text = ""
+            StatusLabel.Text = "Saved key invalid. Please enter a new key."
+            StatusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+            deleteKey() -- Remove invalid saved key
+        end
+    end)
+else
+    -- Show key input on startup if no saved key
+    KeyInputFrame.Visible = true
+    ScrollFrame.Visible = false
+end
 
 -- Periodic key re-verification (every 5 minutes)
 task.spawn(function()
