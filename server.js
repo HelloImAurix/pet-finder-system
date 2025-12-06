@@ -27,6 +27,39 @@ app.use(express.json());
 
 let petFinds = [];
 const MAX_FINDS = 1000;
+const STORAGE_DURATION_HOURS = 1; // Store finds for 1 hour
+const ALWAYS_SHOW_MINUTES = 10; // Always show last 10 minutes
+
+// Helper function to get timestamp from find
+function getFindTimestamp(find) {
+    if (find.receivedAt) {
+        return new Date(find.receivedAt).getTime();
+    }
+    if (find.timestamp) {
+        const ts = typeof find.timestamp === 'number' ? find.timestamp : parseInt(find.timestamp);
+        return ts < 10000000000 ? ts * 1000 : ts;
+    }
+    return Date.now(); // Default to now if no timestamp
+}
+
+// Cleanup function to remove finds older than 1 hour
+function cleanupOldFinds() {
+    const now = Date.now();
+    const oneHourAgo = now - (STORAGE_DURATION_HOURS * 60 * 60 * 1000);
+    
+    const beforeCleanup = petFinds.length;
+    
+    // Remove finds older than 1 hour
+    petFinds = petFinds.filter(find => {
+        const findTime = getFindTimestamp(find);
+        return findTime > oneHourAgo;
+    });
+    
+    const afterCleanup = petFinds.length;
+    if (beforeCleanup !== afterCleanup) {
+        console.log(`[Cleanup] Removed ${beforeCleanup - afterCleanup} finds older than 1 hour. Remaining: ${afterCleanup}`);
+    }
+}
 
 const rateLimitStore = new Map();
 
@@ -109,6 +142,9 @@ app.post('/api/pet-found', rateLimit, (req, res) => {
             addedCount++;
         }
         
+        // Clean up old finds before checking max limit
+        cleanupOldFinds();
+        
         if (petFinds.length > MAX_FINDS) {
             petFinds = petFinds.slice(0, MAX_FINDS);
         }
@@ -145,43 +181,45 @@ app.get('/api/finds', (req, res) => {
 
 app.get('/api/finds/recent', rateLimit, (req, res) => {
     try {
-        // Use receivedAt (when server received it) for filtering - more reliable
-        const tenMinutesAgo = Date.now() - (10 * 60 * 1000);
-        const recent = petFinds.filter(find => {
-            if (find.receivedAt) {
-                // receivedAt is ISO string - use this as it's set when server receives the data
-                const findTime = new Date(find.receivedAt).getTime();
-                return findTime > tenMinutesAgo;
-            }
-            // Fallback to timestamp if receivedAt is missing
-            if (find.timestamp) {
-                const ts = typeof find.timestamp === 'number' ? find.timestamp : parseInt(find.timestamp);
-                const findTime = ts < 10000000000 ? ts * 1000 : ts;
-                return findTime > tenMinutesAgo;
-            }
-            // If no timestamp at all, include it (shouldn't happen)
-            return true;
+        const now = Date.now();
+        const oneHourAgo = now - (STORAGE_DURATION_HOURS * 60 * 60 * 1000);
+        const tenMinutesAgo = now - (ALWAYS_SHOW_MINUTES * 60 * 1000);
+        
+        // Get finds from the last hour
+        const hourFinds = petFinds.filter(find => {
+            const findTime = getFindTimestamp(find);
+            return findTime > oneHourAgo;
         });
         
-        console.log(`[API] /api/finds/recent - Total finds: ${petFinds.length}, Recent (last 10min): ${recent.length}`);
-        if (recent.length > 0) {
-            console.log(`[API] First find - petName: ${recent[0].petName}, mps: ${recent[0].mps}, placeId: ${recent[0].placeId}, jobId: ${recent[0].jobId}`);
-        } else if (petFinds.length > 0) {
-            const oldestFind = petFinds[petFinds.length - 1];
-            let oldestTime = Date.now();
-            if (oldestFind.receivedAt) {
-                oldestTime = new Date(oldestFind.receivedAt).getTime();
-            } else if (oldestFind.timestamp) {
-                const ts = typeof oldestFind.timestamp === 'number' ? oldestFind.timestamp : parseInt(oldestFind.timestamp);
-                oldestTime = ts < 10000000000 ? ts * 1000 : ts;
+        // Separate into last 10 minutes and older (but within hour)
+        const last10Minutes = [];
+        const olderButWithinHour = [];
+        
+        for (const find of hourFinds) {
+            const findTime = getFindTimestamp(find);
+            if (findTime > tenMinutesAgo) {
+                last10Minutes.push(find);
+            } else {
+                olderButWithinHour.push(find);
             }
-            const ageMinutes = Math.floor((Date.now() - oldestTime) / (60 * 1000));
-            console.log(`[API] All finds are older than 10 minutes. Oldest find is ${ageMinutes} minutes old.`);
-        } else {
-            console.log(`[API] No finds in storage at all. Waiting for bots to send data.`);
         }
         
-        res.json({ success: true, finds: recent, total: recent.length });
+        // Sort both groups by most recent first
+        last10Minutes.sort((a, b) => getFindTimestamp(b) - getFindTimestamp(a));
+        olderButWithinHour.sort((a, b) => getFindTimestamp(b) - getFindTimestamp(a));
+        
+        // Combine: last 10 minutes first, then older finds within the hour
+        const combined = [...last10Minutes, ...olderButWithinHour];
+        
+        console.log(`[API] /api/finds/recent - Total stored: ${petFinds.length}, Last hour: ${hourFinds.length}, Last 10min: ${last10Minutes.length}, Returning: ${combined.length}`);
+        
+        res.json({ 
+            success: true, 
+            finds: combined, 
+            total: combined.length,
+            last10Minutes: last10Minutes.length,
+            lastHour: hourFinds.length
+        });
     } catch (error) {
         console.error('[API] Error:', error);
         res.status(500).json({ success: false, error: error.message });
@@ -367,6 +405,15 @@ if (jobIdFetcher) {
 } else {
     console.warn('[JobIDs] Job ID fetcher module not available - server hopping bypass disabled');
 }
+
+// Hourly cleanup to remove finds older than 1 hour (but keep last 10 minutes)
+setInterval(() => {
+    console.log('[Cleanup] Running hourly cleanup...');
+    cleanupOldFinds();
+}, 60 * 60 * 1000); // Every hour
+
+// Run initial cleanup on startup
+cleanupOldFinds();
 
 // Error handler for uncaught errors
 process.on('uncaughtException', (error) => {
