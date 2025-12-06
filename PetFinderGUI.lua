@@ -755,7 +755,7 @@ local function fetchFinds()
                 end
                 
                 -- Always refresh display when we get new data
-                filterAndDisplayFinds()
+                displayFinds()
                 updatePetInfo()
             else
                 warn("[GUI] API response format issue. Data type:", type(data), "Has finds:", data and data.finds ~= nil)
