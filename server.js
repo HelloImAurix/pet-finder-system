@@ -375,7 +375,7 @@ app.get('/api/health', (req, res) => {
     });
 });
 
-// Get server IP (for LuArmor whitelisting)
+// Get server IP
 app.get('/api/ip', async (req, res) => {
     try {
         // Get outbound IP by making a request to an external service
@@ -395,15 +395,12 @@ app.get('/api/ip', async (req, res) => {
         
         res.json({
             success: true,
-            message: 'Use this IP to whitelist in LuArmor dashboard',
-            ip: response.ip,
-            instructions: 'Go to LuArmor dashboard → API Settings → Whitelist this IP'
+            ip: response.ip
         });
     } catch (error) {
         res.status(500).json({
             success: false,
-            error: error.message,
-            note: 'Could not determine IP. Check Railway network settings or contact support.'
+            error: error.message
         });
     }
 });
