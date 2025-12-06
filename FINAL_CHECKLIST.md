@@ -62,7 +62,6 @@ Your scripts are already updated with the correct URL:
 Everything should be working now:
 - ✅ Server deployed on Railway
 - ✅ Environment variables set
-- ✅ IP whitelisted in LuArmor
 - ✅ Scripts updated with correct URLs
 - ✅ Security features enabled (batching, auth, rate limiting)
 
@@ -79,7 +78,7 @@ Everything should be working now:
 - Check browser console for errors
 
 **LuArmor verification failing?**
-- Verify IP is whitelisted (you did this ✅)
 - Check environment variables are set correctly
 - Check Railway logs for LuArmor API errors
+- Verify user's LuArmor license key is valid
 
