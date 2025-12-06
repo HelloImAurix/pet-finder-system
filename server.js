@@ -24,7 +24,6 @@ const rateLimitStore = new Map(); // IP -> { count: number, resetTime: number }
 
 // LuArmor API configuration (https://luarmor.net/)
 // Get your API key from: https://luarmor.net/dashboard
-// Whitelist your server IP in LuArmor dashboard for API access
 // Documentation: https://docs.luarmor.net/docs/luarmor-api-documentation
 const LUARMOR_API_URL = process.env.LUARMOR_API_URL || "https://api.luarmor.net/v3";
 const LUARMOR_API_KEY = process.env.LUARMOR_API_KEY || ""; // Your LuArmor API key (REQUIRED)
@@ -92,7 +91,6 @@ async function verifyLuArmorKey(userKey) {
         // LuArmor API: GET /v3/projects/:project_id/users?user_key=KEY
         // Documentation: https://docs.luarmor.net/docs/luarmor-api-documentation
         // Rate limit: 60 requests per minute
-        // IMPORTANT: Whitelist your server IP in LuArmor dashboard!
         
         const endpoint = `${LUARMOR_API_URL}/projects/${LUARMOR_PROJECT_ID}/users?user_key=${encodeURIComponent(userKey)}`;
         const url = new URL(endpoint);
