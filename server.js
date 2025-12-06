@@ -219,6 +219,7 @@ app.get('/api/finds/all', (req, res) => {
 app.get('/api/job-ids', (req, res) => {
     try {
         if (!jobIdFetcher) {
+            console.warn('[API] /api/job-ids requested but jobIdFetcher module not available');
             return res.status(503).json({ 
                 success: false, 
                 error: 'Job ID fetcher module not available' 
@@ -228,17 +229,25 @@ app.get('/api/job-ids', (req, res) => {
         const limit = parseInt(req.query.limit) || 100;
         const exclude = req.query.exclude ? req.query.exclude.split(',') : [];
         
+        console.log(`[API] /api/job-ids requested - limit: ${limit}, exclude: ${exclude.length} IDs`);
+        
         // Load cache
         jobIdFetcher.loadCache();
         let jobIds = jobIdFetcher.getJobIds();
+        
+        console.log(`[API] Loaded ${jobIds.length} job IDs from cache`);
         
         // Filter out excluded job IDs
         const excludeSet = new Set(exclude);
         jobIds = jobIds.filter(id => !excludeSet.has(id.toString()));
         
+        console.log(`[API] After filtering: ${jobIds.length} job IDs available`);
+        
         // Shuffle and limit
         const shuffled = jobIds.sort(() => Math.random() - 0.5);
         const result = shuffled.slice(0, limit);
+        
+        console.log(`[API] Returning ${result.length} job IDs to client`);
         
         res.json({
             success: true,
@@ -249,6 +258,7 @@ app.get('/api/job-ids', (req, res) => {
         });
     } catch (error) {
         console.error('[API] Error fetching job IDs:', error);
+        console.error('[API] Error stack:', error.stack);
         res.status(500).json({ success: false, error: error.message });
     }
 });
