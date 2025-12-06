@@ -242,18 +242,31 @@ jobIdFetcher.loadCache();
 const cacheInfo = jobIdFetcher.getCacheInfo();
 console.log(`[JobIDs] Loaded ${cacheInfo.count} cached job IDs (last updated: ${cacheInfo.lastUpdated || 'never'})`);
 
-// Auto-refresh cache every 30 minutes
-setInterval(() => {
-    console.log('[JobIDs] Auto-refreshing job ID cache...');
+// If cache is empty or low, fetch immediately on startup
+if (cacheInfo.count < 1000) {
+    console.log('[JobIDs] Cache is low, fetching job IDs immediately...');
     jobIdFetcher.fetchBulkJobIds()
         .then(result => {
             jobIdFetcher.saveCache();
-            console.log(`[JobIDs] Auto-refresh complete: ${result.total} total job IDs`);
+            console.log(`[JobIDs] Initial fetch complete: ${result.total} total job IDs cached`);
+        })
+        .catch(error => {
+            console.error('[JobIDs] Initial fetch failed:', error.message);
+        });
+}
+
+// Auto-refresh cache every 10 minutes to get fresh servers
+setInterval(() => {
+    console.log('[JobIDs] Auto-refreshing job ID cache (every 10 minutes)...');
+    jobIdFetcher.fetchBulkJobIds()
+        .then(result => {
+            jobIdFetcher.saveCache();
+            console.log(`[JobIDs] Auto-refresh complete: ${result.total} total job IDs cached`);
         })
         .catch(error => {
             console.error('[JobIDs] Auto-refresh failed:', error.message);
         });
-}, 30 * 60 * 1000); // 30 minutes
+}, 10 * 60 * 1000); // 10 minutes - refresh more frequently for fresh servers
 
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`[API] Pet Finder API Server running on port ${PORT}`);
