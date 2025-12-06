@@ -365,6 +365,39 @@ app.get('/api/health', (req, res) => {
     });
 });
 
+// Get server IP (for LuArmor whitelisting)
+app.get('/api/ip', async (req, res) => {
+    try {
+        // Get outbound IP by making a request to an external service
+        const response = await new Promise((resolve, reject) => {
+            https.get('https://api.ipify.org?format=json', (res) => {
+                let data = '';
+                res.on('data', (chunk) => { data += chunk; });
+                res.on('end', () => {
+                    try {
+                        resolve(JSON.parse(data));
+                    } catch (e) {
+                        reject(e);
+                    }
+                });
+            }).on('error', reject);
+        });
+        
+        res.json({
+            success: true,
+            message: 'Use this IP to whitelist in LuArmor dashboard',
+            ip: response.ip,
+            instructions: 'Go to LuArmor dashboard → API Settings → Whitelist this IP'
+        });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: error.message,
+            note: 'Could not determine IP. Check Railway network settings or contact support.'
+        });
+    }
+});
+
 // Root endpoint
 app.get('/', (req, res) => {
     res.json({ 
