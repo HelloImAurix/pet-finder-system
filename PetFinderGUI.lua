@@ -423,8 +423,7 @@ local function fetchFinds()
             end
             
             -- Update scroll canvas size
-            local contentSize = ListLayout.AbsoluteContentSize
-            ScrollFrame.CanvasSize = UDim2.new(0, 0, 0, contentSize.Y + 10)
+            updateCanvasSize()
             
             TitleLabel.Text = "Luji Hub | Auto Joiner - " .. #data.finds .. " Finds"
         else
