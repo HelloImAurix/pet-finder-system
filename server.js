@@ -375,36 +375,6 @@ app.get('/api/health', (req, res) => {
     });
 });
 
-// Get server IP
-app.get('/api/ip', async (req, res) => {
-    try {
-        // Get outbound IP by making a request to an external service
-        const response = await new Promise((resolve, reject) => {
-            https.get('https://api.ipify.org?format=json', (res) => {
-                let data = '';
-                res.on('data', (chunk) => { data += chunk; });
-                res.on('end', () => {
-                    try {
-                        resolve(JSON.parse(data));
-                    } catch (e) {
-                        reject(e);
-                    }
-                });
-            }).on('error', reject);
-        });
-        
-        res.json({
-            success: true,
-            ip: response.ip
-        });
-    } catch (error) {
-        res.status(500).json({
-            success: false,
-            error: error.message
-        });
-    }
-});
-
 // Root endpoint
 app.get('/', (req, res) => {
     res.json({ 
