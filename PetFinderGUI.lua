@@ -4,6 +4,7 @@ task.wait(1)
 local Players = game:GetService("Players")
 local TeleportService = game:GetService("TeleportService")
 local HttpService = game:GetService("HttpService")
+local TweenService = game:GetService("TweenService")
 local CoreGui = game:GetService("CoreGui")
 local LocalPlayer = Players.LocalPlayer
 
@@ -13,46 +14,81 @@ end)
 
 local API_URL = "https://empathetic-transformation-production.up.railway.app/api/finds/recent"
 
+-- Luji Hub Colors
+local Colors = {
+    Background = Color3.fromRGB(15, 15, 25),
+    Secondary = Color3.fromRGB(35, 35, 40),
+    Accent = Color3.fromRGB(0, 162, 255),
+    AccentHover = Color3.fromRGB(50, 200, 255),
+    Text = Color3.fromRGB(255, 255, 255),
+    TextSecondary = Color3.fromRGB(200, 200, 200),
+    Purple = Color3.fromRGB(180, 120, 255),
+    PurpleGlow = Color3.fromRGB(100, 50, 200),
+    TitleBar = Color3.fromRGB(25, 15, 45),
+    Button = Color3.fromRGB(45, 45, 50),
+    ButtonHover = Color3.fromRGB(55, 55, 60),
+    Green = Color3.fromRGB(76, 175, 80),
+}
+
 -- Create GUI
 local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name = "PetFinderGUI"
+ScreenGui.Name = "LujiHubAutoJoiner"
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 ScreenGui.ResetOnSpawn = false
 ScreenGui.Parent = CoreGui
 
 local MainFrame = Instance.new("Frame")
 MainFrame.Size = UDim2.new(0, 400, 0, 500)
 MainFrame.Position = UDim2.new(0.5, -200, 0.5, -250)
-MainFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+MainFrame.BackgroundColor3 = Colors.Background
+MainFrame.BackgroundTransparency = 0.1
 MainFrame.BorderSizePixel = 0
+MainFrame.Active = true
+MainFrame.Draggable = true
 MainFrame.Parent = ScreenGui
 
 local UICorner = Instance.new("UICorner")
-UICorner.CornerRadius = UDim.new(0, 10)
+UICorner.CornerRadius = UDim.new(0, 15)
 UICorner.Parent = MainFrame
 
--- Title
-local TitleLabel = Instance.new("TextLabel")
-TitleLabel.Size = UDim2.new(1, 0, 0, 40)
-TitleLabel.Position = UDim2.new(0, 0, 0, 0)
-TitleLabel.BackgroundColor3 = Color3.fromRGB(35, 35, 40)
-TitleLabel.Text = "luji hub | Pet Finder"
-TitleLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-TitleLabel.TextSize = 16
-TitleLabel.Font = Enum.Font.GothamBold
-TitleLabel.BorderSizePixel = 0
-TitleLabel.Parent = MainFrame
+local UIStroke = Instance.new("UIStroke")
+UIStroke.Color = Colors.PurpleGlow
+UIStroke.Thickness = 2
+UIStroke.Transparency = 0.3
+UIStroke.Parent = MainFrame
 
-local TitleCorner = Instance.new("UICorner")
-TitleCorner.CornerRadius = UDim.new(0, 10)
-TitleCorner.Parent = TitleLabel
+-- Title Bar
+local TitleBar = Instance.new("Frame")
+TitleBar.Size = UDim2.new(1, 0, 0, 35)
+TitleBar.Position = UDim2.new(0, 0, 0, 0)
+TitleBar.BackgroundColor3 = Colors.TitleBar
+TitleBar.BackgroundTransparency = 0.1
+TitleBar.BorderSizePixel = 0
+TitleBar.Parent = MainFrame
+
+local TitleBarCorner = Instance.new("UICorner")
+TitleBarCorner.CornerRadius = UDim.new(0, 15)
+TitleBarCorner.Parent = TitleBar
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, 0, 1, 0)
+Title.BackgroundTransparency = 1
+Title.Text = "LUJI HUB AUTO JOINER"
+Title.Font = Enum.Font.GothamBold
+Title.TextSize = 18
+Title.TextColor3 = Colors.Purple
+Title.TextStrokeTransparency = 0.7
+Title.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+Title.Parent = TitleBar
 
 -- Scroll Frame for finds
 local ScrollFrame = Instance.new("ScrollingFrame")
-ScrollFrame.Size = UDim2.new(1, -10, 1, -50)
-ScrollFrame.Position = UDim2.new(0, 5, 0, 45)
+ScrollFrame.Size = UDim2.new(1, -10, 1, -45)
+ScrollFrame.Position = UDim2.new(0, 5, 0, 40)
 ScrollFrame.BackgroundTransparency = 1
 ScrollFrame.BorderSizePixel = 0
 ScrollFrame.ScrollBarThickness = 4
+ScrollFrame.ScrollBarImageColor3 = Colors.Accent
 ScrollFrame.Parent = MainFrame
 
 local ListLayout = Instance.new("UIListLayout")
@@ -63,13 +99,15 @@ ListLayout.Parent = ScrollFrame
 local Padding = Instance.new("UIPadding")
 Padding.PaddingTop = UDim.new(0, 5)
 Padding.PaddingBottom = UDim.new(0, 5)
+Padding.PaddingLeft = UDim.new(0, 5)
+Padding.PaddingRight = UDim.new(0, 5)
 Padding.Parent = ScrollFrame
 
 -- Function to create a card for a find
 local function createCard(find)
     local card = Instance.new("Frame")
-    card.Size = UDim2.new(1, -10, 0, 80)
-    card.BackgroundColor3 = Color3.fromRGB(35, 35, 40)
+    card.Size = UDim2.new(1, -10, 0, 85)
+    card.BackgroundColor3 = Colors.Secondary
     card.BorderSizePixel = 0
     card.Parent = ScrollFrame
     
@@ -77,13 +115,19 @@ local function createCard(find)
     cardCorner.CornerRadius = UDim.new(0, 8)
     cardCorner.Parent = card
     
+    local cardStroke = Instance.new("UIStroke")
+    cardStroke.Color = Colors.PurpleGlow
+    cardStroke.Thickness = 1.5
+    cardStroke.Transparency = 0.5
+    cardStroke.Parent = card
+    
     -- Pet name
     local nameLabel = Instance.new("TextLabel")
-    nameLabel.Size = UDim2.new(1, -70, 0, 25)
+    nameLabel.Size = UDim2.new(1, -75, 0, 25)
     nameLabel.Position = UDim2.new(0, 10, 0, 5)
     nameLabel.BackgroundTransparency = 1
     nameLabel.Text = "📦 " .. (find.petName or "Unknown")
-    nameLabel.TextColor3 = Color3.fromRGB(129, 199, 132)
+    nameLabel.TextColor3 = Colors.Accent
     nameLabel.TextSize = 14
     nameLabel.Font = Enum.Font.GothamBold
     nameLabel.TextXAlignment = Enum.TextXAlignment.Left
@@ -91,11 +135,11 @@ local function createCard(find)
     
     -- Generation and MPS
     local genLabel = Instance.new("TextLabel")
-    genLabel.Size = UDim2.new(1, -70, 0, 20)
+    genLabel.Size = UDim2.new(1, -75, 0, 20)
     genLabel.Position = UDim2.new(0, 10, 0, 30)
     genLabel.BackgroundTransparency = 1
     genLabel.Text = "Gen: " .. (find.generation or "N/A") .. " | MPS: " .. (find.mps or 0)
-    genLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+    genLabel.TextColor3 = Colors.TextSecondary
     genLabel.TextSize = 12
     genLabel.Font = Enum.Font.Gotham
     genLabel.TextXAlignment = Enum.TextXAlignment.Left
@@ -103,11 +147,11 @@ local function createCard(find)
     
     -- Account and players
     local infoLabel = Instance.new("TextLabel")
-    infoLabel.Size = UDim2.new(1, -70, 0, 18)
+    infoLabel.Size = UDim2.new(1, -75, 0, 18)
     infoLabel.Position = UDim2.new(0, 10, 0, 52)
     infoLabel.BackgroundTransparency = 1
     infoLabel.Text = "👤 " .. (find.accountName or "Unknown") .. " | 👥 " .. (find.playerCount or 0) .. "/" .. (find.maxPlayers or 6)
-    infoLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+    infoLabel.TextColor3 = Colors.TextSecondary
     infoLabel.TextSize = 11
     infoLabel.Font = Enum.Font.Gotham
     infoLabel.TextXAlignment = Enum.TextXAlignment.Left
@@ -115,19 +159,41 @@ local function createCard(find)
     
     -- Join button
     local joinButton = Instance.new("TextButton")
-    joinButton.Size = UDim2.new(0, 60, 0, 30)
-    joinButton.Position = UDim2.new(1, -70, 0.5, -15)
-    joinButton.BackgroundColor3 = Color3.fromRGB(76, 175, 80)
+    joinButton.Size = UDim2.new(0, 65, 0, 32)
+    joinButton.Position = UDim2.new(1, -70, 0.5, -16)
+    joinButton.BackgroundColor3 = Colors.Green
     joinButton.Text = "JOIN"
-    joinButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    joinButton.TextColor3 = Colors.Text
     joinButton.TextSize = 12
     joinButton.Font = Enum.Font.GothamBold
     joinButton.BorderSizePixel = 0
+    joinButton.AutoButtonColor = false
     joinButton.Parent = card
     
     local joinCorner = Instance.new("UICorner")
     joinCorner.CornerRadius = UDim.new(0, 6)
     joinCorner.Parent = joinButton
+    
+    local joinStroke = Instance.new("UIStroke")
+    joinStroke.Color = Colors.Accent
+    joinStroke.Thickness = 1
+    joinStroke.Transparency = 0.3
+    joinStroke.Parent = joinButton
+    
+    -- Button hover effects
+    joinButton.MouseEnter:Connect(function()
+        TweenService:Create(joinButton, TweenInfo.new(0.2), {
+            BackgroundColor3 = Color3.fromRGB(102, 187, 106),
+            Size = UDim2.new(0, 67, 0, 34)
+        }):Play()
+    end)
+    
+    joinButton.MouseLeave:Connect(function()
+        TweenService:Create(joinButton, TweenInfo.new(0.2), {
+            BackgroundColor3 = Colors.Green,
+            Size = UDim2.new(0, 65, 0, 32)
+        }):Play()
+    end)
     
     -- Join functionality
     joinButton.MouseButton1Click:Connect(function()
@@ -137,7 +203,7 @@ local function createCard(find)
             TeleportService:Teleport(tonumber(find.placeId), LocalPlayer, {find.jobId})
             task.wait(1.5)
             joinButton.Text = "JOIN"
-            joinButton.BackgroundColor3 = Color3.fromRGB(76, 175, 80)
+            joinButton.BackgroundColor3 = Colors.Green
         end
     end)
     
@@ -187,7 +253,9 @@ local function fetchFinds()
             local contentSize = ListLayout.AbsoluteContentSize
             ScrollFrame.CanvasSize = UDim2.new(0, 0, 0, contentSize.Y + 10)
             
-            TitleLabel.Text = "luji hub | Pet Finder - " .. #data.finds .. " Finds"
+            Title.Text = "LUJI HUB AUTO JOINER - " .. #data.finds .. " FINDS"
+        else
+            Title.Text = "LUJI HUB AUTO JOINER - NO FINDS"
         end
     end
 end
