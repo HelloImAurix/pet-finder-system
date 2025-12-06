@@ -15,9 +15,55 @@ end)
 local API_URL = "https://empathetic-transformation-production.up.railway.app/api/finds/recent"
 local VERIFY_URL = "https://empathetic-transformation-production.up.railway.app/api/verify-key"
 
+-- Key storage file path
+local KEY_FILE = "luji_hub_key.txt"
+
 -- LuArmor Key (will be obfuscated by LuArmor)
 local LUARMOR_KEY = nil
 local KEY_VERIFIED = false
+
+-- Function to save key to file
+local function saveKey(key)
+    if writefile then
+        pcall(function()
+            writefile(KEY_FILE, key)
+        end)
+    elseif isfile then
+        pcall(function()
+            if isfile(KEY_FILE) then
+                writefile(KEY_FILE, key)
+            else
+                writefile(KEY_FILE, key)
+            end
+        end)
+    end
+end
+
+-- Function to load key from file
+local function loadKey()
+    if readfile and isfile then
+        local success, key = pcall(function()
+            if isfile(KEY_FILE) then
+                return readfile(KEY_FILE)
+            end
+        end)
+        if success and key and key ~= "" then
+            return key
+        end
+    end
+    return nil
+end
+
+-- Function to delete saved key
+local function deleteKey()
+    if delfile then
+        pcall(function()
+            if isfile and isfile(KEY_FILE) then
+                delfile(KEY_FILE)
+            end
+        end)
+    end
+end
 
 -- Luji Hub Colors
 local Colors = {
@@ -467,11 +513,14 @@ task.spawn(function()
             local verified, _ = verifyKey(LUARMOR_KEY)
             if not verified then
                 KEY_VERIFIED = false
+                LUARMOR_KEY = nil
                 KeyInputFrame.Visible = true
                 ScrollFrame.Visible = false
+                KeyTextBox.Text = ""
                 Title.Text = "LUJI HUB AUTO JOINER"
                 StatusLabel.Text = "Key expired or invalid. Please re-enter."
                 StatusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+                deleteKey() -- Remove expired key
             end
         end
     end
