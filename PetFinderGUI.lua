@@ -219,13 +219,19 @@ UserInputService.InputEnded:Connect(function(input)
 end)
 
 -- Scroll Frame for finds
+local CONTENT_HEIGHT = HEIGHT - HEADER_HEIGHT
 local ScrollFrame = Instance.new("ScrollingFrame")
-ScrollFrame.Size = UDim2.new(1, -10, 1, -45)
-ScrollFrame.Position = UDim2.new(0, 5, 0, 40)
+ScrollFrame.Size = UDim2.new(1, -8, 0, CONTENT_HEIGHT)
+ScrollFrame.Position = UDim2.new(0, 4, 0, HEADER_HEIGHT)
 ScrollFrame.BackgroundTransparency = 1
 ScrollFrame.BorderSizePixel = 0
-ScrollFrame.ScrollBarThickness = 4
-ScrollFrame.ScrollBarImageColor3 = Colors.Accent
+ScrollFrame.ScrollBarThickness = isMobile and 4 or 3
+ScrollFrame.ScrollBarImageColor3 = Colors.PurpleGlow
+ScrollFrame.ScrollingEnabled = true
+ScrollFrame.ScrollingDirection = Enum.ScrollingDirection.Y
+ScrollFrame.ElasticBehavior = Enum.ElasticBehavior.Always
+ScrollFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+ScrollFrame.Visible = true
 ScrollFrame.Parent = MainFrame
 
 local ListLayout = Instance.new("UIListLayout")
