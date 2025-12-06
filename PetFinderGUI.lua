@@ -15,7 +15,7 @@ pcall(function()
     HttpService.HttpEnabled = true
 end)
 
-local API_URL = "https://web-production-36dae.up.railway.app/api/finds/recent"
+local API_URL = "https://empathetic-transformation-production.up.railway.app/api/finds/recent"
 local UPDATE_INTERVAL = 1
 
 local Colors = {
@@ -60,9 +60,9 @@ if Workspace.CurrentCamera then
     end)
 end
 
-local MOBILE_WIDTH = math.min(viewportSize.X * 0.85, 250)
+local MOBILE_WIDTH = math.min(viewportSize.X * 0.85, 400)
 local MOBILE_HEIGHT = math.min(viewportSize.Y * 0.7, 240)
-local WIDTH = isMobile and MOBILE_WIDTH or 250
+local WIDTH = isMobile and MOBILE_WIDTH or 400
 local HEIGHT = isMobile and MOBILE_HEIGHT or 240
 
 local isMinimized = false
@@ -275,7 +275,6 @@ local function minimizeGUI()
     
     minimizeTween.Completed:Connect(function()
         ContentFrame.Visible = false
-        InfoFrame.Visible = false
         MinimizeButton.Text = "+"
         ToggleButton.Visible = true
     end)
@@ -286,7 +285,6 @@ local function maximizeGUI()
     isMinimized = false
     
     ContentFrame.Visible = true
-    InfoFrame.Visible = true
     MinimizeButton.Text = "−"
     ToggleButton.Visible = false
     
@@ -401,9 +399,8 @@ local function formatMPS(n)
     end
 end
 
-local INFO_HEIGHT = isMobile and 36 or 34
 local SPACING = 4
-local CONTENT_HEIGHT = HEIGHT - HEADER_HEIGHT - INFO_HEIGHT - (SPACING * 2)
+local CONTENT_HEIGHT = HEIGHT - HEADER_HEIGHT - SPACING
 
 local MinMPSValue = Instance.new("NumberValue")
 MinMPSValue.Name = "MinMPSValue"
@@ -533,96 +530,13 @@ local function filterAndDisplayFinds()
     end
 end
 
-local InfoFrame = Instance.new("Frame")
-InfoFrame.Name = "InfoFrame"
-InfoFrame.Size = UDim2.new(1, -8, 0, INFO_HEIGHT)
-InfoFrame.Position = UDim2.new(0, 4, 0, HEADER_HEIGHT + SPACING)
-InfoFrame.BackgroundColor3 = Colors.Secondary
-InfoFrame.BorderSizePixel = 0
-InfoFrame.Parent = MainFrame
-
-local InfoCorner = Instance.new("UICorner")
-InfoCorner.CornerRadius = UDim.new(0, 6)
-InfoCorner.Parent = InfoFrame
-
-local InfoStroke = Instance.new("UIStroke")
-InfoStroke.Color = Colors.PurpleGlow
-InfoStroke.Thickness = 1.5
-InfoStroke.Transparency = 0.3
-InfoStroke.Parent = InfoFrame
-
-local InfoLayout = Instance.new("UIListLayout")
-InfoLayout.FillDirection = Enum.FillDirection.Horizontal
-InfoLayout.HorizontalAlignment = Enum.HorizontalAlignment.Left
-InfoLayout.VerticalAlignment = Enum.VerticalAlignment.Center
-InfoLayout.Padding = UDim.new(0, 6)
-InfoLayout.Parent = InfoFrame
-
-local InfoPadding = Instance.new("UIPadding")
-InfoPadding.PaddingLeft = UDim.new(0, 6)
-InfoPadding.PaddingRight = UDim.new(0, 6)
-InfoPadding.PaddingTop = UDim.new(0, 4)
-InfoPadding.PaddingBottom = UDim.new(0, 4)
-InfoPadding.Parent = InfoFrame
-
-local TotalPetsLabel = Instance.new("TextLabel")
-TotalPetsLabel.Name = "TotalPetsLabel"
-TotalPetsLabel.Size = UDim2.new(0, 0, 1, 0)
-TotalPetsLabel.AutomaticSize = Enum.AutomaticSize.X
-TotalPetsLabel.BackgroundTransparency = 1
-TotalPetsLabel.Text = "📊 Total: 0"
-TotalPetsLabel.TextColor3 = Colors.Text
-TotalPetsLabel.TextSize = isMobile and 9 or 10
-TotalPetsLabel.Font = Enum.Font.GothamBold
-TotalPetsLabel.Parent = InfoFrame
-
-
-local HighestMPSLabel = Instance.new("TextLabel")
-HighestMPSLabel.Name = "HighestMPSLabel"
-HighestMPSLabel.Size = UDim2.new(0, 0, 1, 0)
-HighestMPSLabel.AutomaticSize = Enum.AutomaticSize.X
-HighestMPSLabel.BackgroundTransparency = 1
-HighestMPSLabel.Text = "⭐ Highest: 0M/s"
-HighestMPSLabel.TextColor3 = Colors.GreenText
-HighestMPSLabel.TextSize = isMobile and 9 or 10
-HighestMPSLabel.Font = Enum.Font.GothamBold
-HighestMPSLabel.Parent = InfoFrame
-
 local function updatePetInfo()
-    local totalPets = #cachedFinds
-    local minMPS = MinMPSValue.Value
-    local highestMPS = 0
-    local highestPetName = "None"
-    
-    for _, find in ipairs(cachedFinds) do
-        local findMPS = find.mps or 0
-        if type(findMPS) ~= "number" then
-            findMPS = tonumber(findMPS) or 0
-        end
-        
-        if findMPS > highestMPS then
-            highestMPS = findMPS
-            highestPetName = find.petName or "Unknown"
-        end
-    end
-    
-    if TotalPetsLabel then
-        TotalPetsLabel.Text = "📊 Total: " .. totalPets
-    end
-    if HighestMPSLabel then
-        if highestMPS > 0 then
-            HighestMPSLabel.Text = "⭐ Highest: " .. formatMPS(highestMPS) .. "/s"
-        else
-            HighestMPSLabel.Text = "⭐ Highest: None"
-        end
-    end
+    -- Function kept for compatibility but no longer updates UI elements
 end
-
-updatePetInfo()
 
 local ContentFrame = Instance.new("ScrollingFrame")
 ContentFrame.Size = UDim2.new(1, -8, 0, CONTENT_HEIGHT)
-ContentFrame.Position = UDim2.new(0, 4, 0, HEADER_HEIGHT + INFO_HEIGHT + SPACING * 2)
+ContentFrame.Position = UDim2.new(0, 4, 0, HEADER_HEIGHT + SPACING)
 ContentFrame.BackgroundTransparency = 1
 ContentFrame.BorderSizePixel = 0
 ContentFrame.ScrollBarThickness = isMobile and 5 or 4

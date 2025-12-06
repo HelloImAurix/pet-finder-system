@@ -11,7 +11,7 @@ pcall(function()
     HttpService.HttpEnabled = true
 end)
 
-local API_URL = "https://web-production-36dae.up.railway.app/api/pet-found"
+local API_URL = "https://empathetic-transformation-production.up.railway.app/api/pet-found"
 local API_KEY = "" -- Set your API key here (from LuArmor)
 local SCAN_INTERVAL = 0.5
 local SCANS_BEFORE_HOP = 10
