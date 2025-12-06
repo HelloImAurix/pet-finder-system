@@ -89,12 +89,15 @@ async function fetchPage(cursor = null) {
     }
 }
 
-// Fetch job IDs in bulk
+// Fetch job IDs in bulk - refreshes entire cache with fresh servers
 async function fetchBulkJobIds() {
     console.log(`[Fetch] Starting bulk fetch for place ID: ${PLACE_ID}`);
     console.log(`[Fetch] Target: ${MAX_JOB_IDS} job IDs, fetching up to ${PAGES_TO_FETCH} pages`);
+    console.log(`[Fetch] This will refresh the entire cache with fresh servers`);
     
-    const existingJobIds = new Set(jobIdCache.jobIds);
+    // Clear existing cache to get fresh servers
+    jobIdCache.jobIds = [];
+    const existingJobIds = new Set();
     let cursor = null;
     let pagesFetched = 0;
     let totalAdded = 0;
@@ -121,6 +124,7 @@ async function fetchBulkJobIds() {
             const players = server.playing || 0;
             
             // Only add if: has players, not already in cache, and not at max capacity
+            // We refresh the entire cache, so we want all fresh servers
             if (players >= MIN_PLAYERS && !existingJobIds.has(jobId) && jobIdCache.jobIds.length < MAX_JOB_IDS) {
                 jobIdCache.jobIds.push(jobId);
                 existingJobIds.add(jobId);
@@ -142,9 +146,15 @@ async function fetchBulkJobIds() {
     
     jobIdCache.totalFetched = jobIdCache.jobIds.length;
     console.log(`[Fetch] Bulk fetch complete!`);
-    console.log(`[Fetch] Total job IDs cached: ${jobIdCache.jobIds.length}`);
-    console.log(`[Fetch] New job IDs added: ${totalAdded}`);
+    console.log(`[Fetch] Total job IDs cached: ${jobIdCache.jobIds.length}/${MAX_JOB_IDS}`);
+    console.log(`[Fetch] Fresh servers added: ${totalAdded}`);
     console.log(`[Fetch] Total servers scanned: ${totalScanned}`);
+    
+    if (jobIdCache.jobIds.length < MAX_JOB_IDS) {
+        console.log(`[Fetch] Warning: Only cached ${jobIdCache.jobIds.length} job IDs, target was ${MAX_JOB_IDS}`);
+    } else {
+        console.log(`[Fetch] Success: Cached full ${MAX_JOB_IDS} job IDs!`);
+    }
     
     return {
         total: jobIdCache.jobIds.length,
