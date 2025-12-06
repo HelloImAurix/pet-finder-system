@@ -762,21 +762,42 @@ local function createFindCard(find)
 end
 
 local function fetchFinds()
+    if not API_KEY or API_KEY == "" then
+        warn("[GUI] API_KEY not set! Set your LuArmor license key to view finds.")
+        StatusLabel.TextColor3 = Color3.fromRGB(255, 0, 0)
+        TitleLabel.Text = "luji hub | Auto Joiner - No API Key"
+        return
+    end
+    
     local success, response = pcall(function()
         if syn and syn.request then
             local res = syn.request({
                 Url = API_URL,
-                Method = "GET"
+                Method = "GET",
+                Headers = {
+                    ["X-API-Key"] = API_KEY
+                }
             })
             return res.Body
         elseif request then
             local res = request({
                 Url = API_URL,
-                Method = "GET"
+                Method = "GET",
+                Headers = {
+                    ["X-API-Key"] = API_KEY
+                }
             })
             return res.Body
         else
-            return HttpService:GetAsync(API_URL, true)
+            -- HttpService RequestAsync with headers
+            local response = HttpService:RequestAsync({
+                Url = API_URL,
+                Method = "GET",
+                Headers = {
+                    ["X-API-Key"] = API_KEY
+                }
+            })
+            return response.Body
         end
     end)
     

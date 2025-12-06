@@ -302,7 +302,7 @@ app.get('/api/finds/recent', rateLimit, authenticate, (req, res) => {
         });
         
         // Debug: Log what we're sending
-        console.log(`[API] Sending ${recent.length} recent finds`);
+        console.log(`[API] Sending ${recent.length} recent finds to authenticated user (${req.authenticatedUser})`);
         if (recent.length > 0) {
             console.log(`[API] First find - placeId: ${recent[0].placeId}, jobId: ${recent[0].jobId}`);
         }
