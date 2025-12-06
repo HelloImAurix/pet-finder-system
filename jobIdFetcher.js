@@ -7,7 +7,7 @@ const PLACE_ID = 109983668079237; // Steal-a-Brainrot game ID
 const CACHE_FILE = path.join(__dirname, 'jobIds_cache.json');
 const MAX_JOB_IDS = 5000; // Maximum job IDs to store
 const PAGES_TO_FETCH = 50; // Number of pages to fetch (100 servers per page = up to 5000 servers)
-const DELAY_BETWEEN_REQUESTS = 2000; // 2 seconds delay between API requests to avoid rate limits
+const DELAY_BETWEEN_REQUESTS = 5000; // 5 seconds delay between API requests to avoid rate limits (increased due to 429 errors)
 const MIN_PLAYERS = 1; // Minimum players required for a server to be included
 
 // Job ID cache structure
