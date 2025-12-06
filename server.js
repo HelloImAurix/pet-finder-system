@@ -123,6 +123,14 @@ app.post('/api/pet-found', rateLimit, (req, res) => {
                 continue;
             }
             
+            // Skip if server is full (safety check - bot should already filter this)
+            const playerCount = findData.playerCount || 0;
+            const maxPlayers = findData.maxPlayers || 6;
+            if (playerCount >= maxPlayers) {
+                console.warn(`[API] Skipping find from full server: ${playerCount}/${maxPlayers} - Pet: ${findData.petName}`);
+                continue;
+            }
+            
             const find = {
                 id: Date.now().toString() + "_" + Math.random().toString(36).substr(2, 9),
                 petName: findData.petName,
@@ -131,8 +139,8 @@ app.post('/api/pet-found', rateLimit, (req, res) => {
                 rarity: findData.rarity || "Unknown",
                 placeId: findData.placeId || 0,
                 jobId: findData.jobId || "",
-                playerCount: findData.playerCount || 0,
-                maxPlayers: findData.maxPlayers || 6,
+                playerCount: playerCount,
+                maxPlayers: maxPlayers,
                 accountName: findData.accountName || accountName,
                 timestamp: findData.timestamp || Date.now(),
                 receivedAt: new Date().toISOString()
