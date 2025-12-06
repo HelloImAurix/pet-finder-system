@@ -352,7 +352,12 @@ app.post('/api/verify-key', rateLimit, async (req, res) => {
         }
     } catch (error) {
         console.error('[API] Key verification error:', error);
-        res.status(500).json({ success: false, error: error.message });
+        // Ensure we always return JSON, not HTML
+        res.status(500).json({ 
+            success: false, 
+            error: error.message || 'Internal server error',
+            valid: false
+        });
     }
 });
 
