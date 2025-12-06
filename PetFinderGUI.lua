@@ -403,16 +403,9 @@ end
 local SPACING = 4
 local CONTENT_HEIGHT = HEIGHT - HEADER_HEIGHT - SPACING
 
-local MinMPSValue = Instance.new("NumberValue")
-MinMPSValue.Name = "MinMPSValue"
-MinMPSValue.Value = 0  -- Show all finds by default
-MinMPSValue.Parent = ScreenGui
-
 local cachedFinds = {}
 
-local updatePetInfo = nil
-
-local function filterAndDisplayFinds()
+local function displayFinds()
     if not ContentFrame or not ContentFrame.Parent then
         warn("[GUI] ContentFrame not available")
         return
@@ -428,10 +421,6 @@ local function filterAndDisplayFinds()
         end
     end
     
-    if updatePetInfo then
-        updatePetInfo()
-    end
-    
     if #cachedFinds == 0 then
         local emptyFrame = Instance.new("Frame")
         emptyFrame.Name = "WaitingFrame"
@@ -442,7 +431,7 @@ local function filterAndDisplayFinds()
         local emptyLabel = Instance.new("TextLabel")
         emptyLabel.Size = UDim2.new(1, 0, 1, 0)
         emptyLabel.BackgroundTransparency = 1
-        emptyLabel.Text = "⏳ Waiting for finds...\n\nBots will appear here when they find pets above threshold."
+        emptyLabel.Text = "⏳ Waiting for finds...\n\nBots will appear here when they find pets."
         emptyLabel.TextColor3 = Colors.TextSecondary
         emptyLabel.TextSize = isMobile and 12 or 14
         emptyLabel.Font = Enum.Font.Gotham
@@ -455,84 +444,34 @@ local function filterAndDisplayFinds()
         return
     end
     
-    local minMPS = MinMPSValue.Value
-    local filteredFinds = {}
-    local highestMPS = 0
-    local highestPetName = "None"
-    
-    print("[GUI] Filtering finds. Total cached:", #cachedFinds, "MinMPS threshold:", minMPS)
-    
-    for _, find in ipairs(cachedFinds) do
-        local findMPS = find.mps
-        if findMPS == nil then
-            findMPS = 0
-        elseif type(findMPS) ~= "number" then
-            findMPS = tonumber(findMPS) or 0
-        end
-        
-        if findMPS >= minMPS then
-            table.insert(filteredFinds, find)
-        end
-        
-        if findMPS > highestMPS then
-            highestMPS = findMPS
-            highestPetName = find.petName or "Unknown"
-        end
-    end
-    
-    print("[GUI] After filtering:", #filteredFinds, "finds pass the threshold")
-    
-    if #filteredFinds > 0 then
-        print("[GUI] Displaying", #filteredFinds, "filtered finds out of", #cachedFinds, "total. MinMPS:", minMPS)
-        for i, find in ipairs(filteredFinds) do
-            local success, card = pcall(function()
-                return createFindCard(find)
-            end)
-            if success and card then
-                card.LayoutOrder = i
-                -- Ensure card is parented (should already be done in createFindCard, but double-check)
-                if not card.Parent then
-                    card.Parent = ContentFrame
-                end
-                print("[GUI] Created card", i, "for:", find.petName or "Unknown", "MPS:", find.mps or 0, "Parent:", card.Parent and card.Parent.Name or "NONE")
-            else
-                warn("[GUI] Failed to create card for:", find.petName or "Unknown", "Error:", tostring(card))
-            end
-        end
-        
-        -- Force canvas size update after a brief delay
-        task.spawn(function()
-            task.wait(0.2)
-            if ContentFrame and ContentFrame.Parent then
-                updateCanvasSize()
-            end
+    -- Display all finds
+    print("[GUI] Displaying", #cachedFinds, "finds")
+    for i, find in ipairs(cachedFinds) do
+        local success, card = pcall(function()
+            return createFindCard(find)
         end)
-        
-        StatusLabel.TextColor3 = Color3.fromRGB(0, 255, 0)
-        TitleLabel.Text = "luji hub | Auto Joiner - " .. #filteredFinds .. "/" .. #cachedFinds .. " Finds | Top: " .. formatMPS(highestMPS) .. "/s"
-    else
-        local emptyFrame = Instance.new("Frame")
-        emptyFrame.Size = UDim2.new(1, -16, 0, 100)
-        emptyFrame.BackgroundTransparency = 1
-        emptyFrame.Parent = ContentFrame
-        
-        local emptyLabel = Instance.new("TextLabel")
-        emptyLabel.Size = UDim2.new(1, 0, 1, 0)
-        emptyLabel.BackgroundTransparency = 1
-        emptyLabel.Text = "⏳ No pets found above " .. formatMPS(minMPS) .. "/s"
-        emptyLabel.TextColor3 = Colors.TextSecondary
-        emptyLabel.TextSize = isMobile and 12 or 14
-        emptyLabel.Font = Enum.Font.Gotham
-        emptyLabel.TextWrapped = true
-        emptyLabel.Parent = emptyFrame
-        
-        StatusLabel.TextColor3 = Color3.fromRGB(255, 165, 0)
-        if #cachedFinds > 0 then
-            TitleLabel.Text = "luji hub | Auto Joiner - 0/" .. #cachedFinds .. " Finds | Top: " .. formatMPS(highestMPS) .. "/s"
+        if success and card then
+            card.LayoutOrder = i
+            -- Ensure card is parented
+            if not card.Parent then
+                card.Parent = ContentFrame
+            end
+            print("[GUI] Created card", i, "for:", find.petName or "Unknown", "MPS:", find.mps or 0)
         else
-            TitleLabel.Text = "luji hub | Auto Joiner - No Results"
+            warn("[GUI] Failed to create card for:", find.petName or "Unknown", "Error:", tostring(card))
         end
     end
+    
+    -- Force canvas size update
+    task.spawn(function()
+        task.wait(0.1)
+        if ContentFrame and ContentFrame.Parent then
+            updateCanvasSize()
+        end
+    end)
+    
+    StatusLabel.TextColor3 = Color3.fromRGB(0, 255, 0)
+    TitleLabel.Text = "luji hub | Auto Joiner - " .. #cachedFinds .. " Finds"
 end
 
 local function updatePetInfo()
