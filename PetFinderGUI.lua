@@ -631,9 +631,9 @@ local function fetchFinds()
             local contentSize = ListLayout.AbsoluteContentSize
             ScrollFrame.CanvasSize = UDim2.new(0, 0, 0, contentSize.Y + 10)
             
-            Title.Text = "LUJI HUB AUTO JOINER - " .. #data.finds .. " FINDS"
+            TitleLabel.Text = "Luji Hub | Auto Joiner - " .. #data.finds .. " Finds"
         else
-            Title.Text = "LUJI HUB AUTO JOINER - NO FINDS"
+            TitleLabel.Text = "Luji Hub | Auto Joiner - No Finds"
         end
     end
 end
