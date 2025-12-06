@@ -292,8 +292,8 @@ app.get('/api/finds', (req, res) => {
     }
 });
 
-// GET: Get recent finds (last 10 minutes) - Requires auth (for buyers using GUI)
-app.get('/api/finds/recent', rateLimit, authenticate, (req, res) => {
+// GET: Get recent finds (last 10 minutes) - No auth (LuArmor handles protection in obfuscated GUI)
+app.get('/api/finds/recent', rateLimit, (req, res) => {
     try {
         const tenMinutesAgo = Date.now() - (10 * 60 * 1000);
         const recent = petFinds.filter(find => {
@@ -302,7 +302,7 @@ app.get('/api/finds/recent', rateLimit, authenticate, (req, res) => {
         });
         
         // Debug: Log what we're sending
-        console.log(`[API] Sending ${recent.length} recent finds to authenticated user (${req.authenticatedUser})`);
+        console.log(`[API] Sending ${recent.length} recent finds to GUI (LuArmor protected)`);
         if (recent.length > 0) {
             console.log(`[API] First find - placeId: ${recent[0].placeId}, jobId: ${recent[0].jobId}`);
         }
