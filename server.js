@@ -270,16 +270,73 @@ app.get('/api/job-ids', (req, res) => {
         console.log(`[API] /api/job-ids requested - limit: ${limit}, exclude: ${exclude.length} IDs`);
         
         // Load cache
-        jobIdFetcher.loadCache();
-        let jobIds = jobIdFetcher.getJobIds();
+        try {
+            jobIdFetcher.loadCache();
+        } catch (cacheError) {
+            console.error('[API] Error loading cache:', cacheError.message);
+            return res.status(500).json({ 
+                success: false, 
+                error: 'Failed to load job ID cache',
+                details: cacheError.message
+            });
+        }
+        
+        let jobIds = [];
+        try {
+            jobIds = jobIdFetcher.getJobIds();
+            if (!Array.isArray(jobIds)) {
+                console.warn('[API] getJobIds() did not return an array, defaulting to empty array');
+                jobIds = [];
+            }
+        } catch (getError) {
+            console.error('[API] Error getting job IDs:', getError.message);
+            jobIds = [];
+        }
         
         console.log(`[API] Loaded ${jobIds.length} job IDs from cache`);
+        
+        // If cache is empty, try to trigger a fetch
+        if (jobIds.length === 0) {
+            console.warn('[API] Cache is empty! Attempting to fetch job IDs...');
+            // Trigger async fetch but don't wait for it
+            jobIdFetcher.fetchBulkJobIds()
+                .then(result => {
+                    jobIdFetcher.saveCache();
+                    console.log(`[API] Background fetch complete: ${result.total} job IDs cached`);
+                })
+                .catch(fetchError => {
+                    console.error('[API] Background fetch failed:', fetchError.message);
+                });
+            
+            // Return empty array but with success: true so bot knows server is working
+            return res.json({
+                success: true,
+                jobIds: [],
+                count: 0,
+                totalAvailable: 0,
+                cacheInfo: jobIdFetcher.getCacheInfo(),
+                message: 'Cache is empty, fetching in background. Please retry in a few seconds.'
+            });
+        }
         
         // Filter out excluded job IDs
         const excludeSet = new Set(exclude);
         jobIds = jobIds.filter(id => !excludeSet.has(id.toString()));
         
         console.log(`[API] After filtering: ${jobIds.length} job IDs available`);
+        
+        // If no job IDs available after filtering, return empty but successful response
+        if (jobIds.length === 0) {
+            console.warn('[API] No job IDs available after filtering excluded IDs');
+            return res.json({
+                success: true,
+                jobIds: [],
+                count: 0,
+                totalAvailable: 0,
+                cacheInfo: jobIdFetcher.getCacheInfo(),
+                message: 'All job IDs were excluded or cache is empty'
+            });
+        }
         
         // Shuffle and limit
         const shuffled = jobIds.sort(() => Math.random() - 0.5);
