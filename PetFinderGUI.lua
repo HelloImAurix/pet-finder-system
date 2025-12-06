@@ -231,8 +231,41 @@ ScrollFrame.ScrollingEnabled = true
 ScrollFrame.ScrollingDirection = Enum.ScrollingDirection.Y
 ScrollFrame.ElasticBehavior = Enum.ElasticBehavior.Always
 ScrollFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
-ScrollFrame.Visible = true
+ScrollFrame.Visible = false
 ScrollFrame.Parent = MainFrame
+
+-- Waiting frame (shown when no finds)
+local WaitingFrame = Instance.new("Frame")
+WaitingFrame.Name = "WaitingFrame"
+WaitingFrame.Size = UDim2.new(1, -8, 0, CONTENT_HEIGHT)
+WaitingFrame.Position = UDim2.new(0, 4, 0, HEADER_HEIGHT)
+WaitingFrame.BackgroundTransparency = 1
+WaitingFrame.BorderSizePixel = 0
+WaitingFrame.Visible = true
+WaitingFrame.Parent = MainFrame
+
+local WaitingLabel1 = Instance.new("TextLabel")
+WaitingLabel1.Size = UDim2.new(1, -16, 0, isMobile and 24 or 28)
+WaitingLabel1.Position = UDim2.new(0, 8, 0.5, isMobile and -30 or -35)
+WaitingLabel1.BackgroundTransparency = 1
+WaitingLabel1.Text = "⏳ Waiting for finds..."
+WaitingLabel1.TextColor3 = Colors.Text
+WaitingLabel1.TextSize = isMobile and 14 or 16
+WaitingLabel1.Font = Enum.Font.GothamBold
+WaitingLabel1.TextXAlignment = Enum.TextXAlignment.Center
+WaitingLabel1.Parent = WaitingFrame
+
+local WaitingLabel2 = Instance.new("TextLabel")
+WaitingLabel2.Size = UDim2.new(1, -16, 0, isMobile and 20 or 22)
+WaitingLabel2.Position = UDim2.new(0, 8, 0.5, isMobile and 0 or 5)
+WaitingLabel2.BackgroundTransparency = 1
+WaitingLabel2.Text = "Bots will appear here when they find pets above threshold."
+WaitingLabel2.TextColor3 = Colors.TextSecondary
+WaitingLabel2.TextSize = isMobile and 11 or 12
+WaitingLabel2.Font = Enum.Font.Gotham
+WaitingLabel2.TextXAlignment = Enum.TextXAlignment.Center
+WaitingLabel2.TextWrapped = true
+WaitingLabel2.Parent = WaitingFrame
 
 local ListLayout = Instance.new("UIListLayout")
 ListLayout.Padding = UDim.new(0, 6)
@@ -408,7 +441,11 @@ local function fetchFinds()
             return HttpService:JSONDecode(response)
         end)
         
-        if success2 and data and data.finds then
+        if success2 and data and data.finds and #data.finds > 0 then
+            -- Show scroll frame, hide waiting frame
+            ScrollFrame.Visible = true
+            WaitingFrame.Visible = false
+            
             -- Clear existing cards
             for _, child in pairs(ScrollFrame:GetChildren()) do
                 if child:IsA("Frame") then
@@ -427,13 +464,20 @@ local function fetchFinds()
             
             TitleLabel.Text = "Luji Hub | Auto Joiner - " .. #data.finds .. " Finds"
         else
-            TitleLabel.Text = "Luji Hub | Auto Joiner - No Finds"
+            -- Show waiting frame, hide scroll frame
+            ScrollFrame.Visible = false
+            WaitingFrame.Visible = true
+            TitleLabel.Text = "Luji Hub | Auto Joiner - Waiting..."
         end
+    else
+        -- Show waiting frame on error
+        ScrollFrame.Visible = false
+        WaitingFrame.Visible = true
+        TitleLabel.Text = "Luji Hub | Auto Joiner - Waiting..."
     end
 end
 
 -- Start fetching finds on startup
-ScrollFrame.Visible = true
 task.spawn(function()
     while ScreenGui.Parent do
         fetchFinds()
