@@ -537,7 +537,7 @@ local function verifyKey(key)
         return false, "Key cannot be empty"
     end
     
-    local success, response = pcall(function()
+    local success, response, statusCode = pcall(function()
         if syn and syn.request then
             local res = syn.request({
                 Url = VERIFY_URL,
@@ -548,7 +548,7 @@ local function verifyKey(key)
                 },
                 Body = HttpService:JSONEncode({key = key, user_key = key})
             })
-            return res.Body
+            return res.Body, res.StatusCode
         elseif request then
             local res = request({
                 Url = VERIFY_URL,
@@ -559,15 +559,21 @@ local function verifyKey(key)
                 },
                 Body = HttpService:JSONEncode({key = key, user_key = key})
             })
-            return res.Body
+            return res.Body, res.StatusCode
         else
-            return HttpService:PostAsync(VERIFY_URL, HttpService:JSONEncode({key = key, user_key = key}), Enum.HttpContentType.ApplicationJson, false, {
+            local response = HttpService:PostAsync(VERIFY_URL, HttpService:JSONEncode({key = key, user_key = key}), Enum.HttpContentType.ApplicationJson, false, {
                 ["X-API-Key"] = key
             })
+            return response, 200
         end
     end)
     
     if success and response then
+        -- Check if response is HTML (error page)
+        if type(response) == "string" and (response:sub(1, 1) == "<" or response:find("<!DOCTYPE") or response:find("<html")) then
+            return false, "Server returned HTML instead of JSON. Check server status."
+        end
+        
         local success2, data = pcall(function()
             return HttpService:JSONDecode(response)
         end)
@@ -579,10 +585,19 @@ local function verifyKey(key)
                 return false, data.error or "Key verification failed"
             end
         else
-            return false, "Invalid response from server"
+            -- Try to extract error message from response
+            local errorMsg = "Invalid response from server"
+            if type(response) == "string" and #response < 200 then
+                errorMsg = "Server error: " .. response:sub(1, 100)
+            end
+            return false, errorMsg
         end
     else
-        return false, "Failed to connect to server"
+        local errorMsg = "Failed to connect to server"
+        if response and type(response) == "string" then
+            errorMsg = errorMsg .. ": " .. response:sub(1, 100)
+        end
+        return false, errorMsg
     end
 end
 
