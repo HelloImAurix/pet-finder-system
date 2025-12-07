@@ -18,7 +18,6 @@ let jobIdCache = {
     totalFetched: 0
 };
 
-// Load existing cache if it exists
 function loadCache() {
     try {
         if (fs.existsSync(CACHE_FILE)) {
@@ -41,7 +40,6 @@ function loadCache() {
         }
     } catch (error) {
         console.warn('[Cache] Failed to load cache:', error.message);
-        // Reset to empty cache on error
         jobIdCache = {
             jobIds: [],
             lastUpdated: null,
@@ -52,7 +50,6 @@ function loadCache() {
     return false;
 }
 
-// Save cache to file
 function saveCache() {
     try {
         jobIdCache.lastUpdated = new Date().toISOString();
@@ -65,7 +62,6 @@ function saveCache() {
     }
 }
 
-// Make HTTP request to Roblox API
 function makeRequest(url) {
     return new Promise((resolve, reject) => {
         https.get(url, (res) => {
@@ -92,7 +88,6 @@ function makeRequest(url) {
     });
 }
 
-// Fetch a single page of servers
 async function fetchPage(cursor = null) {
     let url = `https://games.roblox.com/v1/games/${PLACE_ID}/servers/Public?sortOrder=Asc&limit=100`;
     if (cursor) {
@@ -108,13 +103,11 @@ async function fetchPage(cursor = null) {
     }
 }
 
-// Fetch job IDs in bulk - refreshes entire cache with fresh servers
 async function fetchBulkJobIds() {
     console.log(`[Fetch] Starting bulk fetch for place ID: ${PLACE_ID}`);
     console.log(`[Fetch] Target: ${MAX_JOB_IDS} job IDs, fetching up to ${PAGES_TO_FETCH} pages`);
     console.log(`[Fetch] This will refresh the entire cache with fresh servers`);
     
-    // Clear existing cache to get fresh servers
     jobIdCache.jobIds = [];
     const existingJobIds = new Set();
     let cursor = null;
@@ -123,7 +116,6 @@ async function fetchBulkJobIds() {
     let totalScanned = 0;
     
     while (pagesFetched < PAGES_TO_FETCH && jobIdCache.jobIds.length < MAX_JOB_IDS) {
-        // Delay to avoid rate limits
         if (pagesFetched > 0) {
             await new Promise(resolve => setTimeout(resolve, DELAY_BETWEEN_REQUESTS));
         }
@@ -142,8 +134,6 @@ async function fetchBulkJobIds() {
             const jobId = server.id;
             const players = server.playing || 0;
             
-            // Only add if: has players, not already in cache, and not at max capacity
-            // We refresh the entire cache, so we want all fresh servers
             if (players >= MIN_PLAYERS && !existingJobIds.has(jobId) && jobIdCache.jobIds.length < MAX_JOB_IDS) {
                 jobIdCache.jobIds.push(jobId);
                 existingJobIds.add(jobId);
@@ -155,7 +145,6 @@ async function fetchBulkJobIds() {
         pagesFetched++;
         console.log(`[Fetch] Page ${pagesFetched}: Added ${pageAdded} new job IDs (Total: ${jobIdCache.jobIds.length}/${MAX_JOB_IDS}, Scanned: ${totalScanned})`);
         
-        // Get next page cursor
         cursor = data.nextPageCursor;
         if (!cursor) {
             console.log(`[Fetch] No more pages available`);
@@ -182,19 +171,15 @@ async function fetchBulkJobIds() {
     };
 }
 
-// Main function
 async function main() {
     console.log('='.repeat(60));
     console.log('Roblox Job ID Bulk Fetcher');
     console.log('='.repeat(60));
     
-    // Load existing cache
     loadCache();
     
-    // Fetch new job IDs
     const result = await fetchBulkJobIds();
     
-    // Save cache
     if (saveCache()) {
         console.log('\n[Success] Cache saved successfully!');
         console.log(`[Stats] Total job IDs: ${result.total}`);
@@ -211,7 +196,6 @@ async function main() {
     console.log('='.repeat(60));
 }
 
-// Run if executed directly
 if (require.main === module) {
     main().catch(error => {
         console.error('[Fatal Error]', error);
@@ -219,7 +203,6 @@ if (require.main === module) {
     });
 }
 
-// Export for use in other modules
 module.exports = {
     fetchBulkJobIds,
     loadCache,
