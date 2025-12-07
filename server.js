@@ -117,13 +117,11 @@ app.post('/api/pet-found', rateLimit, (req, res) => {
         let addedCount = 0;
         
         for (const findData of finds) {
-            // Validate required fields
             if (!findData.petName) {
-                console.warn('[API] Skipping find with missing petName:', findData);
+                console.warn('[API] Skipping find with missing petName');
                 continue;
             }
             
-            // Skip if server is full (safety check - bot should already filter this)
             const playerCount = findData.playerCount || 0;
             const maxPlayers = findData.maxPlayers || 6;
             if (playerCount >= maxPlayers) {
@@ -131,17 +129,20 @@ app.post('/api/pet-found', rateLimit, (req, res) => {
                 continue;
             }
             
+            const mps = typeof findData.mps === 'number' ? findData.mps : (parseFloat(findData.mps) || 0);
+            const generation = findData.generation ? String(findData.generation) : "N/A";
+            
             const find = {
                 id: Date.now().toString() + "_" + Math.random().toString(36).substr(2, 9),
-                petName: findData.petName,
-                generation: findData.generation || "N/A",
-                mps: findData.mps || 0,
-                rarity: findData.rarity || "Unknown",
+                petName: String(findData.petName),
+                generation: generation,
+                mps: mps,
+                rarity: findData.rarity ? String(findData.rarity) : "Unknown",
                 placeId: findData.placeId || 0,
-                jobId: findData.jobId || "",
+                jobId: findData.jobId ? String(findData.jobId) : "",
                 playerCount: playerCount,
                 maxPlayers: maxPlayers,
-                accountName: findData.accountName || accountName,
+                accountName: findData.accountName ? String(findData.accountName) : accountName,
                 timestamp: findData.timestamp || Date.now(),
                 receivedAt: new Date().toISOString()
             };
@@ -160,15 +161,8 @@ app.post('/api/pet-found', rateLimit, (req, res) => {
         console.log(`[API] ✅ Received batch of ${addedCount} pet finds from ${accountName}`);
         if (addedCount > 0) {
             const sample = petFinds[0];
-            console.log(`[API] 📦 Sample find - petName: ${sample.petName}, mps: ${sample.mps}, placeId: ${sample.placeId}, jobId: ${sample.jobId}, account: ${sample.accountName}`);
+            console.log(`[API] 📦 Sample find - petName: ${sample.petName}, gen: ${sample.generation}, mps: ${sample.mps}, placeId: ${sample.placeId}, jobId: ${sample.jobId}, account: ${sample.accountName}`);
             console.log(`[API] 💾 Total finds in storage: ${petFinds.length}`);
-            
-            // Log all finds in this batch for debugging
-            finds.forEach((find, idx) => {
-                if (idx < 3) { // Only log first 3 to avoid spam
-                    console.log(`[API]   Find ${idx + 1}: ${find.petName} (${find.mps} MPS) - Place: ${find.placeId}, Job: ${find.jobId}`);
-                }
-            });
         }
         
         res.status(200).json({ 
