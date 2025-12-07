@@ -22,8 +22,123 @@ if (fs.existsSync(jobIdFetcherPath)) {
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+const API_KEYS = {
+    BOT: process.env.BOT_API_KEY || 'bot_key_change_me',
+    GUI: process.env.GUI_API_KEY || 'gui_key_change_me',
+    ADMIN: process.env.ADMIN_API_KEY || 'admin_key_change_me'
+};
+
+const flaggedIPs = new Map();
+const flaggedAccounts = new Map();
+const requestLogs = new Map();
+
+function flagIP(ip, reason) {
+    if (!flaggedIPs.has(ip)) {
+        flaggedIPs.set(ip, {
+            count: 0,
+            reasons: [],
+            firstFlagged: Date.now(),
+            lastFlagged: Date.now()
+        });
+    }
+    const flag = flaggedIPs.get(ip);
+    flag.count++;
+    flag.reasons.push({ reason, timestamp: Date.now() });
+    flag.lastFlagged = Date.now();
+    console.warn(`[Flag] IP ${ip} flagged: ${reason} (Total flags: ${flag.count})`);
+}
+
+function flagAccount(accountName, reason) {
+    if (!flaggedAccounts.has(accountName)) {
+        flaggedAccounts.set(accountName, {
+            count: 0,
+            reasons: [],
+            firstFlagged: Date.now(),
+            lastFlagged: Date.now()
+        });
+    }
+    const flag = flaggedAccounts.get(accountName);
+    flag.count++;
+    flag.reasons.push({ reason, timestamp: Date.now() });
+    flag.lastFlagged = Date.now();
+    console.warn(`[Flag] Account ${accountName} flagged: ${reason} (Total flags: ${flag.count})`);
+}
+
+function isFlagged(ip, accountName) {
+    const ipFlag = flaggedIPs.get(ip);
+    const accountFlag = flaggedAccounts.get(accountName);
+    
+    if (ipFlag && ipFlag.count >= 5) return { flagged: true, reason: 'IP flagged too many times' };
+    if (accountFlag && accountFlag.count >= 5) return { flagged: true, reason: 'Account flagged too many times' };
+    
+    return { flagged: false };
+}
+
+function logRequest(ip, endpoint, method) {
+    const key = `${ip}_${endpoint}`;
+    if (!requestLogs.has(key)) {
+        requestLogs.set(key, []);
+    }
+    const logs = requestLogs.get(key);
+    logs.push(Date.now());
+    
+    const recentLogs = logs.filter(time => Date.now() - time < 60000);
+    requestLogs.set(key, recentLogs);
+    
+    if (recentLogs.length > 100) {
+        flagIP(ip, `Excessive requests to ${endpoint}`);
+    }
+}
+
+function authorize(requiredKey) {
+    return (req, res, next) => {
+        const apiKey = req.headers['x-api-key'] || req.headers['authorization']?.replace('Bearer ', '');
+        
+        if (!apiKey) {
+            const ip = req.ip || req.connection.remoteAddress || req.headers['x-forwarded-for']?.split(',')[0] || 'unknown';
+            flagIP(ip, 'Missing API key');
+            logRequest(ip, req.path, req.method);
+            return res.status(401).json({ 
+                success: false, 
+                error: 'Unauthorized. API key required.' 
+            });
+        }
+        
+        if (!API_KEYS[requiredKey] || apiKey !== API_KEYS[requiredKey]) {
+            const ip = req.ip || req.connection.remoteAddress || req.headers['x-forwarded-for']?.split(',')[0] || 'unknown';
+            flagIP(ip, 'Invalid API key');
+            logRequest(ip, req.path, req.method);
+            return res.status(403).json({ 
+                success: false, 
+                error: 'Forbidden. Invalid API key.' 
+            });
+        }
+        
+        next();
+    };
+}
+
+function validateRequest(req, res, next) {
+    const ip = req.ip || req.connection.remoteAddress || req.headers['x-forwarded-for']?.split(',')[0] || 'unknown';
+    logRequest(ip, req.path, req.method);
+    
+    if (req.body && typeof req.body === 'object') {
+        const bodySize = JSON.stringify(req.body).length;
+        if (bodySize > 1000000) {
+            flagIP(ip, 'Request body too large');
+            return res.status(413).json({ 
+                success: false, 
+                error: 'Request body too large' 
+            });
+        }
+    }
+    
+    next();
+}
+
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '1mb' }));
+app.use(validateRequest);
 
 let petFinds = [];
 const MAX_FINDS = 1000;
@@ -100,41 +215,140 @@ setInterval(() => {
     }
 }, 60000);
 
-app.post('/api/pet-found', rateLimit, (req, res) => {
+setInterval(() => {
+    const now = Date.now();
+    const oneDayAgo = now - (24 * 60 * 60 * 1000);
+    
+    for (const [ip, flag] of flaggedIPs.entries()) {
+        if (flag.lastFlagged < oneDayAgo && flag.count < 10) {
+            flaggedIPs.delete(ip);
+        }
+    }
+    
+    for (const [account, flag] of flaggedAccounts.entries()) {
+        if (flag.lastFlagged < oneDayAgo && flag.count < 10) {
+            flaggedAccounts.delete(account);
+        }
+    }
+}, 60 * 60 * 1000);
+
+function validatePetFind(findData) {
+    const errors = [];
+    
+    if (!findData.petName || typeof findData.petName !== 'string' || findData.petName.trim().length === 0) {
+        errors.push('Invalid or missing petName');
+    }
+    
+    if (findData.petName && findData.petName.length > 100) {
+        errors.push('petName too long (max 100 characters)');
+    }
+    
+    if (findData.mps !== undefined) {
+        const mps = typeof findData.mps === 'number' ? findData.mps : parseFloat(findData.mps);
+        if (isNaN(mps) || mps < 0 || mps > 1e20) {
+            errors.push('Invalid MPS value');
+        }
+    }
+    
+    if (findData.placeId !== undefined) {
+        const placeId = typeof findData.placeId === 'number' ? findData.placeId : parseInt(findData.placeId);
+        if (isNaN(placeId) || placeId <= 0 || placeId > 1e15) {
+            errors.push('Invalid placeId');
+        }
+    }
+    
+    if (findData.jobId !== undefined && findData.jobId !== null) {
+        const jobIdStr = String(findData.jobId);
+        if (jobIdStr.length > 50) {
+            errors.push('jobId too long');
+        }
+    }
+    
+    if (findData.playerCount !== undefined) {
+        const playerCount = typeof findData.playerCount === 'number' ? findData.playerCount : parseInt(findData.playerCount);
+        if (isNaN(playerCount) || playerCount < 0 || playerCount > 100) {
+            errors.push('Invalid playerCount');
+        }
+    }
+    
+    if (findData.maxPlayers !== undefined) {
+        const maxPlayers = typeof findData.maxPlayers === 'number' ? findData.maxPlayers : parseInt(findData.maxPlayers);
+        if (isNaN(maxPlayers) || maxPlayers < 1 || maxPlayers > 100) {
+            errors.push('Invalid maxPlayers');
+        }
+    }
+    
+    if (findData.accountName && typeof findData.accountName === 'string' && findData.accountName.length > 50) {
+        errors.push('accountName too long');
+    }
+    
+    return errors;
+}
+
+app.post('/api/pet-found', authorize('BOT'), rateLimit, (req, res) => {
     try {
+        const ip = req.ip || req.connection.remoteAddress || req.headers['x-forwarded-for']?.split(',')[0] || 'unknown';
         const body = req.body;
         const finds = body.finds || [body];
         
         if (!Array.isArray(finds) || finds.length === 0) {
-            console.error('[API] Invalid request - no finds array');
+            flagIP(ip, 'Empty or invalid finds array');
             return res.status(400).json({ 
                 success: false, 
                 error: 'Invalid request. Expected "finds" array or single find object.' 
             });
         }
         
+        if (finds.length > 100) {
+            flagIP(ip, 'Too many finds in batch');
+            return res.status(400).json({ 
+                success: false, 
+                error: 'Too many finds in batch. Maximum 100 per request.' 
+            });
+        }
+        
         const accountName = body.accountName || finds[0]?.accountName || "Unknown";
+        const flagged = isFlagged(ip, accountName);
+        if (flagged.flagged) {
+            return res.status(403).json({ 
+                success: false, 
+                error: flagged.reason 
+            });
+        }
+        
         let addedCount = 0;
+        let skippedCount = 0;
+        let invalidCount = 0;
         
         for (const findData of finds) {
-            if (!findData.petName) {
-                console.warn('[API] Skipping find with missing petName');
+            const validationErrors = validatePetFind(findData);
+            if (validationErrors.length > 0) {
+                invalidCount++;
+                if (invalidCount > 10) {
+                    flagIP(ip, 'Too many invalid finds');
+                    flagAccount(accountName, 'Too many invalid finds');
+                }
                 continue;
             }
             
             const playerCount = findData.playerCount || 0;
             const maxPlayers = findData.maxPlayers || 6;
             if (playerCount >= maxPlayers) {
-                console.warn(`[API] Skipping find from full server: ${playerCount}/${maxPlayers} - Pet: ${findData.petName}`);
+                skippedCount++;
                 continue;
             }
             
             const mps = typeof findData.mps === 'number' ? findData.mps : (parseFloat(findData.mps) || 0);
+            if (mps < 10000000) {
+                skippedCount++;
+                continue;
+            }
+            
             const generation = findData.generation ? String(findData.generation) : "N/A";
             
             const find = {
                 id: Date.now().toString() + "_" + Math.random().toString(36).substr(2, 9),
-                petName: String(findData.petName),
+                petName: String(findData.petName).trim(),
                 generation: generation,
                 mps: mps,
                 rarity: findData.rarity ? String(findData.rarity) : "Unknown",
@@ -149,6 +363,11 @@ app.post('/api/pet-found', rateLimit, (req, res) => {
             
             petFinds.unshift(find);
             addedCount++;
+        }
+        
+        if (invalidCount > finds.length * 0.5) {
+            flagIP(ip, 'High percentage of invalid finds');
+            flagAccount(accountName, 'High percentage of invalid finds');
         }
         
         // Clean up old finds before checking max limit
@@ -177,9 +396,9 @@ app.post('/api/pet-found', rateLimit, (req, res) => {
     }
 });
 
-app.get('/api/finds', (req, res) => {
+app.get('/api/finds', authorize('ADMIN'), (req, res) => {
     try {
-        const limit = parseInt(req.query.limit) || 50;
+        const limit = Math.min(parseInt(req.query.limit) || 50, 500);
         const finds = petFinds.slice(0, limit);
         console.log(`[API] /api/finds requested - returning ${finds.length} finds (total: ${petFinds.length})`);
         res.json({ success: true, finds: finds, total: petFinds.length });
@@ -189,7 +408,7 @@ app.get('/api/finds', (req, res) => {
     }
 });
 
-app.get('/api/finds/recent', rateLimit, (req, res) => {
+app.get('/api/finds/recent', authorize('GUI'), rateLimit, (req, res) => {
     try {
         const now = Date.now();
         const oneHourAgo = now - (STORAGE_DURATION_HOURS * 60 * 60 * 1000);
@@ -236,7 +455,7 @@ app.get('/api/finds/recent', rateLimit, (req, res) => {
     }
 });
 
-app.delete('/api/finds', (req, res) => {
+app.delete('/api/finds', authorize('ADMIN'), (req, res) => {
     petFinds = [];
     res.json({ success: true, message: 'All finds cleared' });
 });
@@ -251,9 +470,9 @@ app.get('/api/health', (req, res) => {
 });
 
 // Debug endpoint to see all finds (not filtered by time)
-app.get('/api/finds/all', (req, res) => {
+app.get('/api/finds/all', authorize('ADMIN'), (req, res) => {
     try {
-        const limit = parseInt(req.query.limit) || 100;
+        const limit = Math.min(parseInt(req.query.limit) || 100, 1000);
         const finds = petFinds.slice(0, limit);
         console.log(`[API] /api/finds/all - returning ${finds.length} finds (total: ${petFinds.length})`);
         res.json({ success: true, finds: finds, total: petFinds.length });
@@ -263,8 +482,61 @@ app.get('/api/finds/all', (req, res) => {
     }
 });
 
+app.get('/api/flags', authorize('ADMIN'), (req, res) => {
+    try {
+        const ipFlags = Array.from(flaggedIPs.entries()).map(([ip, data]) => ({
+            ip,
+            count: data.count,
+            reasons: data.reasons.slice(-10),
+            firstFlagged: data.firstFlagged,
+            lastFlagged: data.lastFlagged
+        }));
+        
+        const accountFlags = Array.from(flaggedAccounts.entries()).map(([account, data]) => ({
+            account,
+            count: data.count,
+            reasons: data.reasons.slice(-10),
+            firstFlagged: data.firstFlagged,
+            lastFlagged: data.lastFlagged
+        }));
+        
+        res.json({
+            success: true,
+            ipFlags,
+            accountFlags,
+            totalIPFlags: flaggedIPs.size,
+            totalAccountFlags: flaggedAccounts.size
+        });
+    } catch (error) {
+        console.error('[API] Error:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+app.post('/api/flags/clear', authorize('ADMIN'), (req, res) => {
+    try {
+        const { ip, account } = req.body;
+        
+        if (ip) {
+            flaggedIPs.delete(ip);
+        }
+        if (account) {
+            flaggedAccounts.delete(account);
+        }
+        if (!ip && !account) {
+            flaggedIPs.clear();
+            flaggedAccounts.clear();
+        }
+        
+        res.json({ success: true, message: 'Flags cleared' });
+    } catch (error) {
+        console.error('[API] Error:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
 // Job ID endpoints for server hopping
-app.get('/api/job-ids', (req, res) => {
+app.get('/api/job-ids', authorize('BOT'), (req, res) => {
     try {
         if (!jobIdFetcher) {
             console.warn('[API] /api/job-ids requested but jobIdFetcher module not available');
@@ -401,7 +673,7 @@ app.get('/api/job-ids/info', (req, res) => {
     }
 });
 
-app.post('/api/job-ids/refresh', (req, res) => {
+app.post('/api/job-ids/refresh', authorize('ADMIN'), (req, res) => {
     try {
         if (!jobIdFetcher) {
             return res.json({ 
@@ -507,19 +779,25 @@ process.on('unhandledRejection', (reason, promise) => {
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`[API] Pet Finder API Server running on port ${PORT}`);
     console.log(`[API] Security: Rate limiting enabled (5 req/10s)`);
+    console.log(`[API] Security: API key authorization enabled`);
+    console.log(`[API] Security: Request validation enabled`);
+    console.log(`[API] Security: Flagging system enabled`);
     console.log(`[API] Endpoints:`);
-    console.log(`[API]   POST /api/pet-found - Receive pet finds (batched)`);
-    console.log(`[API]   GET  /api/finds - Get all finds`);
-    console.log(`[API]   GET  /api/finds/recent - Get recent finds (public)`);
-    console.log(`[API]   GET  /api/finds/all - Get all finds (debug, no time filter)`);
-    console.log(`[API]   DELETE /api/finds - Clear all finds`);
-    console.log(`[API]   GET  /api/health - Health check`);
+    console.log(`[API]   POST /api/pet-found - Receive pet finds (batched) [BOT KEY]`);
+    console.log(`[API]   GET  /api/finds - Get all finds [ADMIN KEY]`);
+    console.log(`[API]   GET  /api/finds/recent - Get recent finds [GUI KEY]`);
+    console.log(`[API]   GET  /api/finds/all - Get all finds (debug) [ADMIN KEY]`);
+    console.log(`[API]   DELETE /api/finds - Clear all finds [ADMIN KEY]`);
+    console.log(`[API]   GET  /api/health - Health check [PUBLIC]`);
+    console.log(`[API]   GET  /api/flags - View flagged IPs/accounts [ADMIN KEY]`);
+    console.log(`[API]   POST /api/flags/clear - Clear flags [ADMIN KEY]`);
     if (jobIdFetcher) {
-        console.log(`[API]   GET  /api/job-ids - Get cached job IDs (limit query param)`);
-        console.log(`[API]   GET  /api/job-ids/info - Get cache info`);
-        console.log(`[API]   POST /api/job-ids/refresh - Manually refresh cache`);
+        console.log(`[API]   GET  /api/job-ids - Get cached job IDs [BOT KEY]`);
+        console.log(`[API]   GET  /api/job-ids/info - Get cache info [BOT KEY]`);
+        console.log(`[API]   POST /api/job-ids/refresh - Manually refresh cache [ADMIN KEY]`);
     } else {
         console.log(`[API]   Job ID endpoints disabled (module not loaded)`);
     }
     console.log(`[API] Server started successfully!`);
+    console.log(`[API] WARNING: Change default API keys in production!`);
 });
