@@ -46,9 +46,11 @@ function authorize(requiredKey) {
     return (req, res, next) => {
         const apiKey = req.headers['x-api-key'] || req.headers['authorization']?.replace('Bearer ', '');
         
+        const ip = req.ip || req.connection.remoteAddress || req.headers['x-forwarded-for']?.split(',')[0] || 'unknown';
+        
         if (!apiKey) {
-            const ip = req.ip || req.connection.remoteAddress || req.headers['x-forwarded-for']?.split(',')[0] || 'unknown';
             logRequest(ip, req.path, req.method);
+            console.warn(`[SERVER] 🔒 Unauthorized request - Missing API key (IP: ${ip}, Endpoint: ${req.method} ${req.path})`);
             return res.status(401).json({ 
                 success: false, 
                 error: 'Unauthorized. API key required.' 
@@ -56,8 +58,8 @@ function authorize(requiredKey) {
         }
         
         if (!API_KEYS[requiredKey] || apiKey !== API_KEYS[requiredKey]) {
-            const ip = req.ip || req.connection.remoteAddress || req.headers['x-forwarded-for']?.split(',')[0] || 'unknown';
             logRequest(ip, req.path, req.method);
+            console.warn(`[SERVER] 🚫 Forbidden request - Invalid API key (IP: ${ip}, Endpoint: ${req.method} ${req.path})`);
             return res.status(403).json({ 
                 success: false, 
                 error: 'Forbidden. Invalid API key.' 
@@ -292,11 +294,23 @@ app.post('/api/pet-found', authorize('BOT'), rateLimit, (req, res) => {
             petFinds = petFinds.slice(0, MAX_FINDS);
         }
         
-        console.log(`[API] ✅ Received batch of ${addedCount} pet finds from ${accountName}`);
+        console.log(`[SERVER] ✅ Pet finds batch received from account: ${accountName} (IP: ${ip})`);
+        console.log(`[SERVER] 📊 Batch stats - Added: ${addedCount}, Skipped: ${skippedCount}, Invalid: ${invalidCount}, Total in batch: ${finds.length}`);
+        
         if (addedCount > 0) {
-            const sample = petFinds[0];
-            console.log(`[API] 📦 Sample find - petName: ${sample.petName}, gen: ${sample.generation}, mps: ${sample.mps}, placeId: ${sample.placeId}, jobId: ${sample.jobId}, account: ${sample.accountName}`);
-            console.log(`[API] 💾 Total finds in storage: ${petFinds.length}`);
+            const addedPets = petFinds.slice(0, addedCount);
+            console.log(`[SERVER] 🐾 New pet finds logged:`);
+            addedPets.forEach((find, idx) => {
+                const mpsFormatted = find.mps >= 1e9 ? `${(find.mps / 1e9).toFixed(2)}B` :
+                                    find.mps >= 1e6 ? `${(find.mps / 1e6).toFixed(2)}M` :
+                                    find.mps >= 1e3 ? `${(find.mps / 1e3).toFixed(2)}K` : find.mps;
+                console.log(`[SERVER]   ${idx + 1}. ${find.petName} | Gen: ${find.generation} | MPS: ${mpsFormatted}/s | JobId: ${find.jobId.substring(0, 8)}... | Players: ${find.playerCount}/${find.maxPlayers}`);
+            });
+            console.log(`[SERVER] 💾 Total finds in storage: ${petFinds.length}`);
+        }
+        
+        if (invalidCount > 0) {
+            console.warn(`[SERVER] ⚠️  ${invalidCount} invalid find(s) rejected from ${accountName}`);
         }
         
         res.status(200).json({ 
@@ -305,20 +319,23 @@ app.post('/api/pet-found', authorize('BOT'), rateLimit, (req, res) => {
             received: addedCount 
         });
     } catch (error) {
-        console.error('[API] Error processing pet finds:', error);
-        console.error('[API] Error stack:', error.stack);
+        const ip = req.ip || req.connection.remoteAddress || req.headers['x-forwarded-for']?.split(',')[0] || 'unknown';
+        console.error(`[SERVER] ❌ Error processing pet finds (IP: ${ip}):`, error.message);
+        console.error(`[SERVER] Stack trace:`, error.stack);
         res.status(500).json({ success: false, error: error.message });
     }
 });
 
 app.get('/api/finds', authorize('ADMIN'), (req, res) => {
     try {
+        const ip = req.ip || req.connection.remoteAddress || req.headers['x-forwarded-for']?.split(',')[0] || 'unknown';
         const limit = Math.min(parseInt(req.query.limit) || 50, 500);
         const finds = petFinds.slice(0, limit);
-        console.log(`[API] /api/finds requested - returning ${finds.length} finds (total: ${petFinds.length})`);
+        console.log(`[SERVER] 👤 Admin requested finds (IP: ${ip}) - returning ${finds.length} finds (total: ${petFinds.length})`);
         res.json({ success: true, finds: finds, total: petFinds.length });
     } catch (error) {
-        console.error('[API] Error:', error);
+        const ip = req.ip || req.connection.remoteAddress || req.headers['x-forwarded-for']?.split(',')[0] || 'unknown';
+        console.error(`[SERVER] ❌ Error in ${req.path} (IP: ${ip}):`, error.message);
         res.status(500).json({ success: false, error: error.message });
     }
 });
@@ -355,7 +372,8 @@ app.get('/api/finds/recent', authorize('GUI'), rateLimit, (req, res) => {
         // Combine: last 10 minutes first, then older finds within the hour
         const combined = [...last10Minutes, ...olderButWithinHour];
         
-        console.log(`[API] /api/finds/recent - Total stored: ${petFinds.length}, Last hour: ${hourFinds.length}, Last 10min: ${last10Minutes.length}, Returning: ${combined.length}`);
+        const ip = req.ip || req.connection.remoteAddress || req.headers['x-forwarded-for']?.split(',')[0] || 'unknown';
+        console.log(`[SERVER] 📱 GUI requested recent finds (IP: ${ip}) - Total stored: ${petFinds.length}, Last hour: ${hourFinds.length}, Last 10min: ${last10Minutes.length}, Returning: ${combined.length}`);
         
         res.json({ 
             success: true, 
@@ -365,7 +383,8 @@ app.get('/api/finds/recent', authorize('GUI'), rateLimit, (req, res) => {
             lastHour: hourFinds.length
         });
     } catch (error) {
-        console.error('[API] Error:', error);
+        const ip = req.ip || req.connection.remoteAddress || req.headers['x-forwarded-for']?.split(',')[0] || 'unknown';
+        console.error(`[SERVER] ❌ Error in ${req.path} (IP: ${ip}):`, error.message);
         res.status(500).json({ success: false, error: error.message });
     }
 });
@@ -389,10 +408,12 @@ app.get('/api/finds/all', authorize('ADMIN'), (req, res) => {
     try {
         const limit = Math.min(parseInt(req.query.limit) || 100, 1000);
         const finds = petFinds.slice(0, limit);
-        console.log(`[API] /api/finds/all - returning ${finds.length} finds (total: ${petFinds.length})`);
+        const ip = req.ip || req.connection.remoteAddress || req.headers['x-forwarded-for']?.split(',')[0] || 'unknown';
+        console.log(`[SERVER] 👤 Admin requested all finds (IP: ${ip}) - returning ${finds.length} finds (total: ${petFinds.length})`);
         res.json({ success: true, finds: finds, total: petFinds.length });
     } catch (error) {
-        console.error('[API] Error:', error);
+        const ip = req.ip || req.connection.remoteAddress || req.headers['x-forwarded-for']?.split(',')[0] || 'unknown';
+        console.error(`[SERVER] ❌ Error in ${req.path} (IP: ${ip}):`, error.message);
         res.status(500).json({ success: false, error: error.message });
     }
 });
@@ -402,7 +423,7 @@ app.get('/api/finds/all', authorize('ADMIN'), (req, res) => {
 app.get('/api/job-ids', authorize('BOT'), (req, res) => {
     try {
         if (!jobIdFetcher) {
-            console.warn('[API] /api/job-ids requested but jobIdFetcher module not available');
+            console.warn(`[SERVER] ⚠️  Job ID fetcher module not available (IP: ${ip})`);
             // Return success with empty array instead of 503, so bot knows server is working
             return res.json({ 
                 success: true,
@@ -421,7 +442,8 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         const limit = parseInt(req.query.limit) || 100;
         const exclude = req.query.exclude ? req.query.exclude.split(',') : [];
         
-        console.log(`[API] /api/job-ids requested - limit: ${limit}, exclude: ${exclude.length} IDs`);
+        const ip = req.ip || req.connection.remoteAddress || req.headers['x-forwarded-for']?.split(',')[0] || 'unknown';
+        console.log(`[SERVER] 🤖 Bot requested job IDs (IP: ${ip}) - limit: ${limit}, exclude: ${exclude.length} IDs`);
         
         // Load cache
         try {
@@ -439,27 +461,27 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         try {
             jobIds = jobIdFetcher.getJobIds();
             if (!Array.isArray(jobIds)) {
-                console.warn('[API] getJobIds() did not return an array, defaulting to empty array');
+                console.warn(`[SERVER] ⚠️  getJobIds() did not return an array, defaulting to empty array (IP: ${ip})`);
                 jobIds = [];
             }
         } catch (getError) {
-            console.error('[API] Error getting job IDs:', getError.message);
+            console.error(`[SERVER] ❌ Error getting job IDs (IP: ${ip}):`, getError.message);
             jobIds = [];
         }
         
-        console.log(`[API] Loaded ${jobIds.length} job IDs from cache`);
+        console.log(`[SERVER] 📦 Loaded ${jobIds.length} job IDs from cache (IP: ${ip})`);
         
         // If cache is empty, try to trigger a fetch
         if (jobIds.length === 0) {
-            console.warn('[API] Cache is empty! Attempting to fetch job IDs...');
+            console.warn(`[SERVER] ⚠️  Cache is empty! Attempting to fetch job IDs... (IP: ${ip})`);
             // Trigger async fetch but don't wait for it
             jobIdFetcher.fetchBulkJobIds()
                 .then(result => {
                     jobIdFetcher.saveCache();
-                    console.log(`[API] Background fetch complete: ${result.total} job IDs cached`);
+                    console.log(`[SERVER] ✅ Background fetch complete: ${result.total} job IDs cached`);
                 })
                 .catch(fetchError => {
-                    console.error('[API] Background fetch failed:', fetchError.message);
+                    console.error(`[SERVER] ❌ Background fetch failed:`, fetchError.message);
                 });
             
             // Return empty array but with success: true so bot knows server is working
@@ -496,7 +518,7 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         const shuffled = jobIds.sort(() => Math.random() - 0.5);
         const result = shuffled.slice(0, limit);
         
-        console.log(`[API] Returning ${result.length} job IDs to client`);
+        console.log(`[SERVER] ✅ Returning ${result.length} job IDs to bot (IP: ${ip})`);
         
         res.json({
             success: true,
@@ -506,8 +528,9 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
             cacheInfo: jobIdFetcher.getCacheInfo()
         });
     } catch (error) {
-        console.error('[API] Error fetching job IDs:', error);
-        console.error('[API] Error stack:', error.stack);
+        const ip = req.ip || req.connection.remoteAddress || req.headers['x-forwarded-for']?.split(',')[0] || 'unknown';
+        console.error(`[SERVER] ❌ Error fetching job IDs (IP: ${ip}):`, error.message);
+        console.error(`[SERVER] Stack trace:`, error.stack);
         res.status(500).json({ success: false, error: error.message });
     }
 });
@@ -531,7 +554,8 @@ app.get('/api/job-ids/info', (req, res) => {
             ...cacheInfo
         });
     } catch (error) {
-        console.error('[API] Error getting cache info:', error);
+        const ip = req.ip || req.connection.remoteAddress || req.headers['x-forwarded-for']?.split(',')[0] || 'unknown';
+        console.error(`[SERVER] ❌ Error getting cache info (IP: ${ip}):`, error.message);
         res.status(500).json({ success: false, error: error.message });
     }
 });
@@ -545,10 +569,12 @@ app.post('/api/job-ids/refresh', authorize('ADMIN'), (req, res) => {
             });
         }
         
-        console.log('[API] Manual cache refresh requested');
+        const ip = req.ip || req.connection.remoteAddress || req.headers['x-forwarded-for']?.split(',')[0] || 'unknown';
+        console.log(`[SERVER] 🔄 Manual cache refresh requested by admin (IP: ${ip})`);
         jobIdFetcher.fetchBulkJobIds()
             .then(result => {
                 jobIdFetcher.saveCache();
+                console.log(`[SERVER] ✅ Cache refresh complete: ${result.total} job IDs cached`);
                 res.json({
                     success: true,
                     message: 'Cache refreshed successfully',
@@ -556,11 +582,12 @@ app.post('/api/job-ids/refresh', authorize('ADMIN'), (req, res) => {
                 });
             })
             .catch(error => {
-                console.error('[API] Error refreshing cache:', error);
+                console.error(`[SERVER] ❌ Error refreshing cache (IP: ${ip}):`, error.message);
                 res.status(500).json({ success: false, error: error.message });
             });
     } catch (error) {
-        console.error('[API] Error:', error);
+        const ip = req.ip || req.connection.remoteAddress || req.headers['x-forwarded-for']?.split(',')[0] || 'unknown';
+        console.error(`[SERVER] ❌ Error in ${req.path} (IP: ${ip}):`, error.message);
         res.status(500).json({ success: false, error: error.message });
     }
 });
@@ -640,24 +667,25 @@ process.on('unhandledRejection', (reason, promise) => {
 });
 
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[API] Pet Finder API Server running on port ${PORT}`);
-    console.log(`[API] Security: Rate limiting enabled (5 req/10s)`);
-    console.log(`[API] Security: API key authorization enabled`);
-    console.log(`[API] Security: Request validation enabled`);
-    console.log(`[API] Endpoints:`);
-    console.log(`[API]   POST /api/pet-found - Receive pet finds (batched) [BOT KEY]`);
-    console.log(`[API]   GET  /api/finds - Get all finds [ADMIN KEY]`);
-    console.log(`[API]   GET  /api/finds/recent - Get recent finds [GUI KEY]`);
-    console.log(`[API]   GET  /api/finds/all - Get all finds (debug) [ADMIN KEY]`);
-    console.log(`[API]   DELETE /api/finds - Clear all finds [ADMIN KEY]`);
-    console.log(`[API]   GET  /api/health - Health check [PUBLIC]`);
+    console.log(`[SERVER] 🚀 Pet Finder API Server running on port ${PORT}`);
+    console.log(`[SERVER] 🔒 Security: Rate limiting enabled (5 req/10s)`);
+    console.log(`[SERVER] 🔑 Security: API key authorization enabled`);
+    console.log(`[SERVER] ✅ Security: Request validation enabled`);
+    console.log(`[SERVER] 📝 All logging is server-side only (no client exposure)`);
+    console.log(`[SERVER] 📋 Available endpoints:`);
+    console.log(`[SERVER]   POST /api/pet-found - Receive pet finds (batched) [BOT KEY]`);
+    console.log(`[SERVER]   GET  /api/finds - Get all finds [ADMIN KEY]`);
+    console.log(`[SERVER]   GET  /api/finds/recent - Get recent finds [GUI KEY]`);
+    console.log(`[SERVER]   GET  /api/finds/all - Get all finds (debug) [ADMIN KEY]`);
+    console.log(`[SERVER]   DELETE /api/finds - Clear all finds [ADMIN KEY]`);
+    console.log(`[SERVER]   GET  /api/health - Health check [PUBLIC]`);
     if (jobIdFetcher) {
-        console.log(`[API]   GET  /api/job-ids - Get cached job IDs [BOT KEY]`);
-        console.log(`[API]   GET  /api/job-ids/info - Get cache info [BOT KEY]`);
-        console.log(`[API]   POST /api/job-ids/refresh - Manually refresh cache [ADMIN KEY]`);
+        console.log(`[SERVER]   GET  /api/job-ids - Get cached job IDs [BOT KEY]`);
+        console.log(`[SERVER]   GET  /api/job-ids/info - Get cache info [BOT KEY]`);
+        console.log(`[SERVER]   POST /api/job-ids/refresh - Manually refresh cache [ADMIN KEY]`);
     } else {
-        console.log(`[API]   Job ID endpoints disabled (module not loaded)`);
+        console.log(`[SERVER]   ⚠️  Job ID endpoints disabled (module not loaded)`);
     }
-    console.log(`[API] Server started successfully!`);
-    console.log(`[API] WARNING: Change default API keys in production!`);
+    console.log(`[SERVER] ✅ Server started successfully!`);
+    console.log(`[SERVER] ⚠️  WARNING: Change default API keys in production!`);
 });
