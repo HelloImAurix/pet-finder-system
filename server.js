@@ -3,7 +3,6 @@ const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 
-// Try to load jobIdFetcher, but don't crash if it fails
 let jobIdFetcher = null;
 const jobIdFetcherPath = path.join(__dirname, 'jobIdFetcher.js');
 if (fs.existsSync(jobIdFetcherPath)) {
@@ -86,10 +85,8 @@ app.use(validateRequest);
 
 let petFinds = [];
 const MAX_FINDS = 1000;
-const STORAGE_DURATION_HOURS = 1; // Store finds for 1 hour
-const ALWAYS_SHOW_MINUTES = 10; // Always show last 10 minutes
-
-// Helper function to get timestamp from find
+const STORAGE_DURATION_HOURS = 1;
+const ALWAYS_SHOW_MINUTES = 10;
 function getFindTimestamp(find) {
     if (find.receivedAt) {
         return new Date(find.receivedAt).getTime();
@@ -98,17 +95,14 @@ function getFindTimestamp(find) {
         const ts = typeof find.timestamp === 'number' ? find.timestamp : parseInt(find.timestamp);
         return ts < 10000000000 ? ts * 1000 : ts;
     }
-    return Date.now(); // Default to now if no timestamp
+    return Date.now();
 }
-
-// Cleanup function to remove finds older than 1 hour
 function cleanupOldFinds() {
     const now = Date.now();
     const oneHourAgo = now - (STORAGE_DURATION_HOURS * 60 * 60 * 1000);
     
     const beforeCleanup = petFinds.length;
     
-    // Remove finds older than 1 hour
     petFinds = petFinds.filter(find => {
         const findTime = getFindTimestamp(find);
         return findTime > oneHourAgo;
@@ -277,7 +271,6 @@ app.post('/api/pet-found', authorize('BOT'), rateLimit, (req, res) => {
             addedCount++;
         }
         
-        // Clean up old finds before checking max limit
         cleanupOldFinds();
         
         if (petFinds.length > MAX_FINDS) {
@@ -314,13 +307,11 @@ app.get('/api/finds/recent', authorize('GUI'), rateLimit, (req, res) => {
         const oneHourAgo = now - (STORAGE_DURATION_HOURS * 60 * 60 * 1000);
         const tenMinutesAgo = now - (ALWAYS_SHOW_MINUTES * 60 * 1000);
         
-        // Get finds from the last hour
         const hourFinds = petFinds.filter(find => {
             const findTime = getFindTimestamp(find);
             return findTime > oneHourAgo;
         });
         
-        // Separate into last 10 minutes and older (but within hour)
         const last10Minutes = [];
         const olderButWithinHour = [];
         
@@ -333,11 +324,9 @@ app.get('/api/finds/recent', authorize('GUI'), rateLimit, (req, res) => {
             }
         }
         
-        // Sort both groups by most recent first
         last10Minutes.sort((a, b) => getFindTimestamp(b) - getFindTimestamp(a));
         olderButWithinHour.sort((a, b) => getFindTimestamp(b) - getFindTimestamp(a));
         
-        // Combine: last 10 minutes first, then older finds within the hour
         const combined = [...last10Minutes, ...olderButWithinHour];
         
         res.json({ 
@@ -366,7 +355,6 @@ app.get('/api/health', (req, res) => {
     });
 });
 
-// Debug endpoint to see all finds (not filtered by time)
 app.get('/api/finds/all', authorize('ADMIN'), (req, res) => {
     try {
         const limit = Math.min(parseInt(req.query.limit) || 100, 1000);
@@ -378,11 +366,9 @@ app.get('/api/finds/all', authorize('ADMIN'), (req, res) => {
 });
 
 
-// Job ID endpoints for server hopping
 app.get('/api/job-ids', authorize('BOT'), (req, res) => {
     try {
         if (!jobIdFetcher) {
-            // Return success with empty array instead of 503, so bot knows server is working
             return res.json({ 
                 success: true,
                 jobIds: [],
@@ -400,7 +386,6 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         const limit = parseInt(req.query.limit) || 100;
         const exclude = req.query.exclude ? req.query.exclude.split(',') : [];
         
-        // Load cache
         try {
             jobIdFetcher.loadCache();
         } catch (cacheError) {
@@ -421,9 +406,7 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
             jobIds = [];
         }
         
-        // If cache is empty, try to trigger a fetch
         if (jobIds.length === 0) {
-            // Trigger async fetch but don't wait for it
             jobIdFetcher.fetchBulkJobIds()
                 .then(result => {
                     jobIdFetcher.saveCache();
@@ -432,7 +415,6 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
                 .catch(fetchError => {
                 });
             
-            // Return empty array but with success: true so bot knows server is working
             return res.json({
                 success: true,
                 jobIds: [],
@@ -443,11 +425,9 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
             });
         }
         
-        // Filter out excluded job IDs
         const excludeSet = new Set(exclude);
         jobIds = jobIds.filter(id => !excludeSet.has(id.toString()));
         
-        // If no job IDs available after filtering, return empty but successful response
         if (jobIds.length === 0) {
             return res.json({
                 success: true,
@@ -459,7 +439,6 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
             });
         }
         
-        // Shuffle and limit
         const shuffled = jobIds.sort(() => Math.random() - 0.5);
         const result = shuffled.slice(0, limit);
         
@@ -541,13 +520,11 @@ app.get('/', (req, res) => {
     });
 });
 
-// Load job ID cache on startup (only if module loaded)
 if (jobIdFetcher) {
     try {
         jobIdFetcher.loadCache();
         const cacheInfo = jobIdFetcher.getCacheInfo();
         
-        // If cache is empty or low, fetch immediately on startup
         if (cacheInfo.count < 1000) {
             jobIdFetcher.fetchBulkJobIds()
                 .then(result => {
@@ -558,7 +535,6 @@ if (jobIdFetcher) {
                 });
         }
         
-        // Auto-refresh cache every 10 minutes to get fresh servers
         setInterval(() => {
             jobIdFetcher.fetchBulkJobIds()
                 .then(result => {
@@ -567,17 +543,15 @@ if (jobIdFetcher) {
                 })
                 .catch(error => {
                 });
-        }, 10 * 60 * 1000); // 10 minutes - refresh more frequently for fresh servers
+        }, 10 * 60 * 1000);
     } catch (error) {
     }
 }
 
-// Hourly cleanup to remove finds older than 1 hour (but keep last 10 minutes)
 setInterval(() => {
     cleanupOldFinds();
-}, 60 * 60 * 1000); // Every hour
+}, 60 * 60 * 1000);
 
-// Run initial cleanup on startup
 cleanupOldFinds();
 
 app.listen(PORT, '0.0.0.0', () => {
