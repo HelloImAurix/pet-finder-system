@@ -28,51 +28,7 @@ const API_KEYS = {
     ADMIN: process.env.ADMIN_API_KEY || 'admin_key_change_me'
 };
 
-const flaggedIPs = new Map();
-const flaggedAccounts = new Map();
 const requestLogs = new Map();
-
-function flagIP(ip, reason) {
-    if (!flaggedIPs.has(ip)) {
-        flaggedIPs.set(ip, {
-            count: 0,
-            reasons: [],
-            firstFlagged: Date.now(),
-            lastFlagged: Date.now()
-        });
-    }
-    const flag = flaggedIPs.get(ip);
-    flag.count++;
-    flag.reasons.push({ reason, timestamp: Date.now() });
-    flag.lastFlagged = Date.now();
-    console.warn(`[Flag] IP ${ip} flagged: ${reason} (Total flags: ${flag.count})`);
-}
-
-function flagAccount(accountName, reason) {
-    if (!flaggedAccounts.has(accountName)) {
-        flaggedAccounts.set(accountName, {
-            count: 0,
-            reasons: [],
-            firstFlagged: Date.now(),
-            lastFlagged: Date.now()
-        });
-    }
-    const flag = flaggedAccounts.get(accountName);
-    flag.count++;
-    flag.reasons.push({ reason, timestamp: Date.now() });
-    flag.lastFlagged = Date.now();
-    console.warn(`[Flag] Account ${accountName} flagged: ${reason} (Total flags: ${flag.count})`);
-}
-
-function isFlagged(ip, accountName) {
-    const ipFlag = flaggedIPs.get(ip);
-    const accountFlag = flaggedAccounts.get(accountName);
-    
-    if (ipFlag && ipFlag.count >= 5) return { flagged: true, reason: 'IP flagged too many times' };
-    if (accountFlag && accountFlag.count >= 5) return { flagged: true, reason: 'Account flagged too many times' };
-    
-    return { flagged: false };
-}
 
 function logRequest(ip, endpoint, method) {
     const key = `${ip}_${endpoint}`;
@@ -84,10 +40,6 @@ function logRequest(ip, endpoint, method) {
     
     const recentLogs = logs.filter(time => Date.now() - time < 60000);
     requestLogs.set(key, recentLogs);
-    
-    if (recentLogs.length > 100) {
-        flagIP(ip, `Excessive requests to ${endpoint}`);
-    }
 }
 
 function authorize(requiredKey) {
@@ -96,7 +48,6 @@ function authorize(requiredKey) {
         
         if (!apiKey) {
             const ip = req.ip || req.connection.remoteAddress || req.headers['x-forwarded-for']?.split(',')[0] || 'unknown';
-            flagIP(ip, 'Missing API key');
             logRequest(ip, req.path, req.method);
             return res.status(401).json({ 
                 success: false, 
@@ -106,7 +57,6 @@ function authorize(requiredKey) {
         
         if (!API_KEYS[requiredKey] || apiKey !== API_KEYS[requiredKey]) {
             const ip = req.ip || req.connection.remoteAddress || req.headers['x-forwarded-for']?.split(',')[0] || 'unknown';
-            flagIP(ip, 'Invalid API key');
             logRequest(ip, req.path, req.method);
             return res.status(403).json({ 
                 success: false, 
@@ -125,7 +75,6 @@ function validateRequest(req, res, next) {
     if (req.body && typeof req.body === 'object') {
         const bodySize = JSON.stringify(req.body).length;
         if (bodySize > 1000000) {
-            flagIP(ip, 'Request body too large');
             return res.status(413).json({ 
                 success: false, 
                 error: 'Request body too large' 
@@ -215,22 +164,6 @@ setInterval(() => {
     }
 }, 60000);
 
-setInterval(() => {
-    const now = Date.now();
-    const oneDayAgo = now - (24 * 60 * 60 * 1000);
-    
-    for (const [ip, flag] of flaggedIPs.entries()) {
-        if (flag.lastFlagged < oneDayAgo && flag.count < 10) {
-            flaggedIPs.delete(ip);
-        }
-    }
-    
-    for (const [account, flag] of flaggedAccounts.entries()) {
-        if (flag.lastFlagged < oneDayAgo && flag.count < 10) {
-            flaggedAccounts.delete(account);
-        }
-    }
-}, 60 * 60 * 1000);
 
 function validatePetFind(findData) {
     const errors = [];
@@ -292,7 +225,6 @@ app.post('/api/pet-found', authorize('BOT'), rateLimit, (req, res) => {
         const finds = body.finds || [body];
         
         if (!Array.isArray(finds) || finds.length === 0) {
-            flagIP(ip, 'Empty or invalid finds array');
             return res.status(400).json({ 
                 success: false, 
                 error: 'Invalid request. Expected "finds" array or single find object.' 
@@ -300,7 +232,6 @@ app.post('/api/pet-found', authorize('BOT'), rateLimit, (req, res) => {
         }
         
         if (finds.length > 100) {
-            flagIP(ip, 'Too many finds in batch');
             return res.status(400).json({ 
                 success: false, 
                 error: 'Too many finds in batch. Maximum 100 per request.' 
@@ -308,13 +239,6 @@ app.post('/api/pet-found', authorize('BOT'), rateLimit, (req, res) => {
         }
         
         const accountName = body.accountName || finds[0]?.accountName || "Unknown";
-        const flagged = isFlagged(ip, accountName);
-        if (flagged.flagged) {
-            return res.status(403).json({ 
-                success: false, 
-                error: flagged.reason 
-            });
-        }
         
         let addedCount = 0;
         let skippedCount = 0;
@@ -324,10 +248,6 @@ app.post('/api/pet-found', authorize('BOT'), rateLimit, (req, res) => {
             const validationErrors = validatePetFind(findData);
             if (validationErrors.length > 0) {
                 invalidCount++;
-                if (invalidCount > 10) {
-                    flagIP(ip, 'Too many invalid finds');
-                    flagAccount(accountName, 'Too many invalid finds');
-                }
                 continue;
             }
             
@@ -363,11 +283,6 @@ app.post('/api/pet-found', authorize('BOT'), rateLimit, (req, res) => {
             
             petFinds.unshift(find);
             addedCount++;
-        }
-        
-        if (invalidCount > finds.length * 0.5) {
-            flagIP(ip, 'High percentage of invalid finds');
-            flagAccount(accountName, 'High percentage of invalid finds');
         }
         
         // Clean up old finds before checking max limit
@@ -482,58 +397,6 @@ app.get('/api/finds/all', authorize('ADMIN'), (req, res) => {
     }
 });
 
-app.get('/api/flags', authorize('ADMIN'), (req, res) => {
-    try {
-        const ipFlags = Array.from(flaggedIPs.entries()).map(([ip, data]) => ({
-            ip,
-            count: data.count,
-            reasons: data.reasons.slice(-10),
-            firstFlagged: data.firstFlagged,
-            lastFlagged: data.lastFlagged
-        }));
-        
-        const accountFlags = Array.from(flaggedAccounts.entries()).map(([account, data]) => ({
-            account,
-            count: data.count,
-            reasons: data.reasons.slice(-10),
-            firstFlagged: data.firstFlagged,
-            lastFlagged: data.lastFlagged
-        }));
-        
-        res.json({
-            success: true,
-            ipFlags,
-            accountFlags,
-            totalIPFlags: flaggedIPs.size,
-            totalAccountFlags: flaggedAccounts.size
-        });
-    } catch (error) {
-        console.error('[API] Error:', error);
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
-app.post('/api/flags/clear', authorize('ADMIN'), (req, res) => {
-    try {
-        const { ip, account } = req.body;
-        
-        if (ip) {
-            flaggedIPs.delete(ip);
-        }
-        if (account) {
-            flaggedAccounts.delete(account);
-        }
-        if (!ip && !account) {
-            flaggedIPs.clear();
-            flaggedAccounts.clear();
-        }
-        
-        res.json({ success: true, message: 'Flags cleared' });
-    } catch (error) {
-        console.error('[API] Error:', error);
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
 
 // Job ID endpoints for server hopping
 app.get('/api/job-ids', authorize('BOT'), (req, res) => {
@@ -781,7 +644,6 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log(`[API] Security: Rate limiting enabled (5 req/10s)`);
     console.log(`[API] Security: API key authorization enabled`);
     console.log(`[API] Security: Request validation enabled`);
-    console.log(`[API] Security: Flagging system enabled`);
     console.log(`[API] Endpoints:`);
     console.log(`[API]   POST /api/pet-found - Receive pet finds (batched) [BOT KEY]`);
     console.log(`[API]   GET  /api/finds - Get all finds [ADMIN KEY]`);
@@ -789,8 +651,6 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log(`[API]   GET  /api/finds/all - Get all finds (debug) [ADMIN KEY]`);
     console.log(`[API]   DELETE /api/finds - Clear all finds [ADMIN KEY]`);
     console.log(`[API]   GET  /api/health - Health check [PUBLIC]`);
-    console.log(`[API]   GET  /api/flags - View flagged IPs/accounts [ADMIN KEY]`);
-    console.log(`[API]   POST /api/flags/clear - Clear flags [ADMIN KEY]`);
     if (jobIdFetcher) {
         console.log(`[API]   GET  /api/job-ids - Get cached job IDs [BOT KEY]`);
         console.log(`[API]   GET  /api/job-ids/info - Get cache info [BOT KEY]`);
