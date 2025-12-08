@@ -52,21 +52,33 @@ app.use((req, res, next) => {
 // This should be super fast - no async operations
 app.get('/health', (req, res) => {
     // Respond immediately without any async operations
-    console.log('[Health] Health check requested from:', req.ip || 'unknown');
-    const cacheInfo = jobIdFetcher ? (() => {
-        try {
-            return jobIdFetcher.getCacheInfo();
-        } catch (e) {
-            return { count: 0, lastUpdated: null, placeId: 0 };
-        }
-    })() : { count: 0, lastUpdated: null, placeId: 0 };
+    const startTime = Date.now();
+    console.log('[Health] Health check requested from:', req.ip || req.headers['x-forwarded-for'] || 'unknown');
     
-    res.json({ 
-        status: 'ok',
-        timestamp: Date.now(),
-        isFetching: isFetching,
-        cacheCount: cacheInfo.count || 0
-    });
+    try {
+        const cacheInfo = jobIdFetcher ? (() => {
+            try {
+                return jobIdFetcher.getCacheInfo();
+            } catch (e) {
+                return { count: 0, lastUpdated: null, placeId: 0 };
+            }
+        })() : { count: 0, lastUpdated: null, placeId: 0 };
+        
+        const response = { 
+            status: 'ok',
+            timestamp: Date.now(),
+            isFetching: isFetching,
+            cacheCount: cacheInfo.count || 0,
+            uptime: process.uptime(),
+            port: PORT
+        };
+        
+        res.json(response);
+        console.log('[Health] Response sent in', Date.now() - startTime, 'ms');
+    } catch (error) {
+        console.error('[Health] Error in health check:', error);
+        res.status(500).json({ status: 'error', error: error.message });
+    }
 });
 
 const API_KEYS = {
@@ -137,6 +149,23 @@ function validateRequest(req, res, next) {
 
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
+
+// Add request logging middleware (before validateRequest to catch all)
+app.use((req, res, next) => {
+    const startTime = Date.now();
+    console.log(`[Request] ${req.method} ${req.path} from ${req.ip || req.headers['x-forwarded-for'] || 'unknown'}`);
+    
+    // Log when response is sent
+    const originalSend = res.send;
+    res.send = function(data) {
+        const duration = Date.now() - startTime;
+        console.log(`[Response] ${req.method} ${req.path} - ${res.statusCode} in ${duration}ms`);
+        return originalSend.call(this, data);
+    };
+    
+    next();
+});
+
 app.use(validateRequest);
 
 // Enhanced storage: Indexed by MPS and timestamp for fast queries
@@ -710,7 +739,7 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         
         // Return empty response immediately (don't wait for fetch)
         console.log('[API] /api/job-ids - Returning empty response (isFetching:', isFetching, ')');
-        return res.json({
+        const response = {
             success: true,
             jobIds: [],
             servers: [],
@@ -719,15 +748,19 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
             cacheInfo: cacheInfo,
             message: isFetching ? 'Cache is being fetched in background. Please retry in a few seconds.' : 'Cache is empty, fetching in background. Please retry in a few seconds.',
             isFetching: isFetching
-        });
+        };
+        console.log('[API] /api/job-ids - Sending response in', Date.now() - startTime, 'ms');
+        return res.json(response);
     } catch (error) {
         console.error('[Servers] Error in /api/job-ids:', error);
         console.error('[Servers] Stack:', error.stack);
-        res.status(500).json({ 
+        const errorResponse = { 
             success: false, 
             error: error.message,
             message: 'Internal server error while fetching job IDs'
-        });
+        };
+        console.log('[API] /api/job-ids - Sending error response in', Date.now() - startTime, 'ms');
+        res.status(500).json(errorResponse);
     }
 });
 
