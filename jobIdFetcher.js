@@ -154,6 +154,7 @@ async function fetchBulkJobIds() {
     console.log(`[Fetch] Filtering: Only caching servers with 7/8 or less players (players < maxPlayers)`);
     console.log(`[Fetch] Filtering: Excluding private servers (VIP check removed - public list only)`);
     console.log(`[Fetch] Only servers with available slots (7/8 or less) will be cached`);
+    console.log(`[Fetch] Incremental caching: Will save cache every 100 servers for immediate availability`);
     
     jobIdCache.jobIds = [];
     const existingJobIds = new Set();
@@ -162,6 +163,7 @@ async function fetchBulkJobIds() {
     let totalAdded = 0;
     let totalScanned = 0;
     let totalFiltered = 0;
+    let lastSaveCount = 0; // Track when we last saved
     
     // Stop fetching if we have enough servers OR if we've checked enough pages
     // Note: Roblox API doesn't support filtering by player count, so we fetch all and filter client-side
@@ -282,6 +284,20 @@ async function fetchBulkJobIds() {
         
         const filterSummary = filterDetails.length > 0 ? filterDetails.join(', ') : 'none';
         console.log(`[Fetch] Page ${pagesFetched}: Added ${pageAdded} new job IDs (7/8 or less players), Filtered ${pageFiltered} (${filterSummary}) (Total: ${jobIdCache.jobIds.length}/${MAX_JOB_IDS}, Scanned: ${totalScanned})`);
+        
+        // Incremental cache save: Save every 100 servers so API can serve them immediately
+        const currentCount = jobIdCache.jobIds.length;
+        if (currentCount - lastSaveCount >= 100) {
+            try {
+                jobIdCache.lastUpdated = new Date().toISOString();
+                jobIdCache.totalFetched = currentCount;
+                fs.writeFileSync(CACHE_FILE, JSON.stringify(jobIdCache, null, 2));
+                console.log(`[Fetch] 💾 Incremental save: Saved ${currentCount} servers to cache (available for API)`);
+                lastSaveCount = currentCount;
+            } catch (saveError) {
+                console.warn(`[Fetch] Failed to save cache incrementally: ${saveError.message}`);
+            }
+        }
         
         // Stop early if we have enough servers with 7/8 or less players
         if (jobIdCache.jobIds.length >= MAX_JOB_IDS) {
