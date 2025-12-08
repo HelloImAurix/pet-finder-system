@@ -114,16 +114,19 @@ function makeRequest(url) {
                     } catch (error) {
                         reject(new Error(`Failed to parse JSON: ${error.message}`));
                     }
+                } else if (res.statusCode === 429) {
+                    // Rate limited - return null to trigger retry logic
+                    reject(new Error(`HTTP 429: Rate limited`));
                 } else {
                     reject(new Error(`HTTP ${res.statusCode}: ${data.substring(0, 200)}`));
                 }
             });
         });
         
-        // Add timeout (30 seconds)
-        request.setTimeout(30000, () => {
+        // Add timeout (20 seconds - reduced to avoid Railway timeouts)
+        request.setTimeout(20000, () => {
             request.destroy();
-            reject(new Error('Request timeout after 30 seconds'));
+            reject(new Error('Request timeout after 20 seconds'));
         });
         
         request.on('error', (error) => {
@@ -143,7 +146,7 @@ async function fetchPage(cursor = null, retryCount = 0) {
         return data;
     } catch (error) {
         // Handle rate limiting (429) with exponential backoff
-        if (error.message.includes('429') || error.message.includes('Too many requests')) {
+        if (error.message.includes('429') || error.message.includes('Rate limited')) {
             if (retryCount < 3) {
                 const backoffDelay = Math.min(10000 * Math.pow(2, retryCount), 60000); // Max 60 seconds
                 console.log(`[Fetch] Rate limited, waiting ${backoffDelay/1000}s before retry (${retryCount + 1}/3)...`);
@@ -152,6 +155,14 @@ async function fetchPage(cursor = null, retryCount = 0) {
             } else {
                 console.error(`[Fetch] Rate limited after ${retryCount + 1} retries, giving up`);
                 return null;
+            }
+        }
+        // Handle timeout errors
+        if (error.message.includes('timeout')) {
+            if (retryCount < 2) {
+                console.log(`[Fetch] Timeout, retrying (${retryCount + 1}/2)...`);
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                return fetchPage(cursor, retryCount + 1);
             }
         }
         console.error(`[Fetch] Error fetching page:`, error.message);
