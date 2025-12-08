@@ -622,27 +622,29 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
             });
         }
         
-        // Get servers with full metadata if available
+        // Get servers with full metadata if available (expired servers are automatically filtered)
         let serversWithMetadata = [];
         try {
             if (typeof jobIdFetcher.getFreshestServers === 'function') {
                 serversWithMetadata = jobIdFetcher.getFreshestServers(limit * 2);
             } else if (typeof jobIdFetcher.getFreshestJobIds === 'function') {
-                // Fallback: Get job IDs and create basic server objects
+                // Fallback: Get job IDs (expired ones are filtered automatically)
                 const jobIds = jobIdFetcher.getFreshestJobIds(limit * 2);
+                const now = Date.now();
                 serversWithMetadata = jobIds.map((id, index) => ({
                     id: id.toString(),
                     players: 0,
                     maxPlayers: 8,
-                    timestamp: Date.now() - (index * 1000)
+                    timestamp: now - (index * 1000) // Approximate timestamp
                 }));
             } else {
                 const jobIds = jobIdFetcher.getJobIds();
+                const now = Date.now();
                 serversWithMetadata = jobIds.map((id, index) => ({
                     id: id.toString(),
                     players: 0,
                     maxPlayers: 8,
-                    timestamp: Date.now() - (index * 1000)
+                    timestamp: now - (index * 1000) // Approximate timestamp
                 }));
             }
         } catch (getError) {
