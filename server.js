@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
+const https = require('https');
 
 console.log('[Startup] Server starting...');
 
@@ -76,6 +77,181 @@ const API_KEYS = {
     GUI: process.env.GUI_API_KEY || 'sablujihub-gui',
     ADMIN: process.env.ADMIN_API_KEY || 'sablujihub-admin'
 };
+
+// Server status check cache - stores recent checks to avoid too many API calls
+const serverStatusCache = new Map();
+const SERVER_CHECK_CACHE_MS = 60 * 1000; // Cache check results for 1 minute
+const PLACE_ID = parseInt(process.env.PLACE_ID, 10) || 109983668079237;
+
+// Function to make HTTP request (similar to jobIdFetcher)
+function makeHttpRequest(url) {
+    return new Promise((resolve, reject) => {
+        const request = https.get(url, (res) => {
+            let data = '';
+            
+            res.on('data', (chunk) => {
+                data += chunk;
+            });
+            
+            res.on('end', () => {
+                if (res.statusCode === 200) {
+                    try {
+                        resolve(JSON.parse(data));
+                    } catch (error) {
+                        reject(new Error(`Failed to parse JSON: ${error.message}`));
+                    }
+                } else if (res.statusCode === 429) {
+                    reject(new Error(`HTTP 429: Rate limited`));
+                } else {
+                    reject(new Error(`HTTP ${res.statusCode}: ${data.substring(0, 200)}`));
+                }
+            });
+        });
+        
+        request.setTimeout(10000, () => {
+            request.destroy();
+            reject(new Error('Request timeout after 10 seconds'));
+        });
+        
+        request.on('error', (error) => {
+            reject(new Error(`Request failed: ${error.message}`));
+        });
+    });
+}
+
+// Check if a specific server is still available (not full)
+async function checkServerStatus(jobId, placeId = PLACE_ID) {
+    const cacheKey = `${jobId}_${placeId}`;
+    const now = Date.now();
+    
+    // Check cache first
+    const cached = serverStatusCache.get(cacheKey);
+    if (cached && (now - cached.timestamp) < SERVER_CHECK_CACHE_MS) {
+        return cached.status; // Return cached result
+    }
+    
+    try {
+        // Fetch servers and search for the specific jobId
+        // We'll search through multiple pages if needed, but limit to avoid rate limits
+        let cursor = null;
+        let pagesChecked = 0;
+        const maxPages = 3; // Limit to 3 pages to avoid rate limits
+        
+        while (pagesChecked < maxPages) {
+            let url = `https://games.roblox.com/v1/games/${placeId}/servers/Public?sortOrder=Desc&limit=100&excludeFullGames=true`;
+            if (cursor) {
+                url += `&cursor=${cursor}`;
+            }
+            
+            const data = await makeHttpRequest(url);
+            
+            if (!data || !data.data || data.data.length === 0) {
+                break; // No more data
+            }
+            
+            // Search for the specific server
+            for (const server of data.data) {
+                if (String(server.id) === String(jobId)) {
+                    const players = server.playing || 0;
+                    const maxPlayers = server.maxPlayers || 8;
+                    const isFull = players >= maxPlayers;
+                    
+                    // Cache the result
+                    const status = {
+                        available: !isFull && players < maxPlayers,
+                        players: players,
+                        maxPlayers: maxPlayers,
+                        timestamp: now
+                    };
+                    serverStatusCache.set(cacheKey, status);
+                    
+                    // Clean up old cache entries
+                    if (serverStatusCache.size > 1000) {
+                        for (const [key, value] of serverStatusCache.entries()) {
+                            if (now - value.timestamp > SERVER_CHECK_CACHE_MS * 2) {
+                                serverStatusCache.delete(key);
+                            }
+                        }
+                    }
+                    
+                    return status;
+                }
+            }
+            
+            cursor = data.nextPageCursor;
+            if (!cursor) {
+                break; // No more pages
+            }
+            
+            pagesChecked++;
+            
+            // Small delay between pages to avoid rate limits
+            if (pagesChecked < maxPages) {
+                await new Promise(resolve => setTimeout(resolve, 500));
+            }
+        }
+        
+        // Server not found in API response - might be full or closed
+        // Cache as unavailable to avoid repeated checks
+        const status = {
+            available: false,
+            players: 0,
+            maxPlayers: 8,
+            timestamp: now,
+            notFound: true
+        };
+        serverStatusCache.set(cacheKey, status);
+        return status;
+        
+    } catch (error) {
+        console.warn(`[ServerCheck] Error checking server ${jobId}:`, error.message);
+        // On error, return null to indicate check failed (don't cache errors)
+        return null;
+    }
+}
+
+// Batch check multiple servers (with rate limiting)
+async function checkServerStatusBatch(servers, maxChecks = 10) {
+    const toCheck = [];
+    const now = Date.now();
+    
+    // Filter servers that should be checked
+    for (const server of servers) {
+        if (toCheck.length >= maxChecks) break;
+        
+        // Only check servers that might be full (close to capacity or stale metadata)
+        const players = server.players || 0;
+        const maxPlayers = server.maxPlayers || 8;
+        const metadataAge = now - (server.timestamp || 0);
+        
+        // Prioritize checking:
+        // 1. Servers near capacity (within 1 slot of full)
+        // 2. Servers with stale metadata (>2 minutes old)
+        const shouldCheck = (players >= (maxPlayers - 1)) || (metadataAge > 2 * 60 * 1000);
+        
+        if (shouldCheck) {
+            toCheck.push(server);
+        }
+    }
+    
+    // Check servers sequentially with delays to avoid rate limits
+    const results = [];
+    for (const server of toCheck) {
+        try {
+            const status = await checkServerStatus(server.id, PLACE_ID);
+            results.push({ server, status });
+        } catch (error) {
+            results.push({ server, status: null, error: error.message });
+        }
+        
+        // Small delay between checks to avoid rate limits
+        if (toCheck.indexOf(server) < toCheck.length - 1) {
+            await new Promise(resolve => setTimeout(resolve, 300));
+        }
+    }
+    
+    return results;
+}
 
 function authorize(requiredKey) {
     return (req, res, next) => {
@@ -523,7 +699,7 @@ app.get('/api/finds/all', authorize('ADMIN'), (req, res) => {
 });
 
 
-app.get('/api/job-ids', authorize('BOT'), (req, res) => {
+app.get('/api/job-ids', authorize('BOT'), async (req, res) => {
     try {
         if (!jobIdFetcher) {
             return res.json({ 
@@ -552,13 +728,131 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         
         // Filter out excluded servers and full servers (players >= maxPlayers)
         const excludeSet = new Set(exclude);
+        const now = Date.now();
+        const METADATA_MAX_AGE_MS = 2 * 60 * 1000; // 2 minutes - consider metadata stale after this
+        const METADATA_STALE_AGE_MS = 5 * 60 * 1000; // 5 minutes - very stale metadata
+        
         servers = servers.filter(server => {
             if (excludeSet.has(server.id)) return false;
-            // Filter out full servers
+            
             const players = server.players || 0;
             const maxPlayers = server.maxPlayers || 8;
-            return players < maxPlayers;
+            const timestamp = server.timestamp || 0;
+            const metadataAge = now - timestamp;
+            
+            // Safety check: ensure we have valid maxPlayers
+            if (maxPlayers <= 0 || maxPlayers > 20) {
+                return false; // Invalid maxPlayers
+            }
+            
+            // Primary check: Filter out full servers (players >= maxPlayers)
+            if (players >= maxPlayers) {
+                return false;
+            }
+            
+            // Safety margin: Exclude servers that are very close to full (within 1 slot)
+            // This helps account for potential race conditions where a server fills up
+            if (players >= (maxPlayers - 1) && players > 0) {
+                // Only exclude near-full servers if metadata is stale (might be full now)
+                if (metadataAge > METADATA_MAX_AGE_MS) {
+                    return false;
+                }
+            }
+            
+            // Prefer servers with fresher metadata (less likely to be stale/full)
+            // But don't exclude stale servers entirely - they might still be valid
+            // Just mark them with lower priority
+            server._metadataAge = metadataAge;
+            server._isStale = metadataAge > METADATA_STALE_AGE_MS;
+            
+            // Extra safety: If metadata is very stale (>10 minutes), be more conservative
+            // Only include if it had low player count when cached
+            if (metadataAge > 10 * 60 * 1000) {
+                // Very stale - only include if it had 3 or fewer players when cached
+                if (players > 3) {
+                    return false;
+                }
+            }
+            
+            return true;
         });
+        
+        // Sort by freshness and player count (prefer fresh servers with more slots available)
+        servers.sort((a, b) => {
+            // First priority: freshness (newer metadata first)
+            if (a._metadataAge !== b._metadataAge) {
+                return a._metadataAge - b._metadataAge;
+            }
+            // Second priority: more available slots (lower player count)
+            const aAvailable = (a.maxPlayers || 8) - (a.players || 0);
+            const bAvailable = (b.maxPlayers || 8) - (b.players || 0);
+            if (aAvailable !== bAvailable) {
+                return bAvailable - aAvailable; // More slots = better
+            }
+            // Third priority: lower player count
+            return (a.players || 0) - (b.players || 0);
+        });
+        
+        // Real-time server status check for top servers (prioritize checking servers we'll actually send)
+        // Only check a limited number to avoid rate limits and keep response time reasonable
+        const serversToCheck = servers.slice(0, Math.min(limit, 10)); // Check top 10 servers max
+        
+        try {
+            // Add timeout to prevent slow responses (max 5 seconds for checks)
+            const checkPromise = checkServerStatusBatch(serversToCheck, 10);
+            const timeoutPromise = new Promise((resolve) => setTimeout(() => resolve([]), 5000));
+            const checkResults = await Promise.race([checkPromise, timeoutPromise]);
+            
+            if (Array.isArray(checkResults) && checkResults.length > 0) {
+                // Update server availability based on real-time checks
+                const checkedServers = new Map();
+                for (const result of checkResults) {
+                    if (result.status) {
+                        checkedServers.set(result.server.id, result.status);
+                    }
+                }
+                
+                // Filter out servers that are full based on real-time check
+                servers = servers.filter(server => {
+                    const realTimeStatus = checkedServers.get(server.id);
+                    
+                    if (realTimeStatus) {
+                        // Use real-time status if available
+                        if (!realTimeStatus.available) {
+                            return false; // Server is full or unavailable
+                        }
+                        // Update server metadata with real-time data
+                        server.players = realTimeStatus.players;
+                        server.maxPlayers = realTimeStatus.maxPlayers;
+                        server.timestamp = realTimeStatus.timestamp;
+                        server._verified = true; // Mark as verified
+                    }
+                    
+                    return true;
+                });
+                
+                // Re-sort after filtering (real-time verified servers get priority)
+                servers.sort((a, b) => {
+                    // Prioritize verified servers
+                    if (a._verified !== b._verified) {
+                        return (b._verified ? 1 : 0) - (a._verified ? 1 : 0);
+                    }
+                    // Then by freshness and available slots
+                    if (a._metadataAge !== b._metadataAge) {
+                        return a._metadataAge - b._metadataAge;
+                    }
+                    const aAvailable = (a.maxPlayers || 8) - (a.players || 0);
+                    const bAvailable = (b.maxPlayers || 8) - (b.players || 0);
+                    if (aAvailable !== bAvailable) {
+                        return bAvailable - aAvailable;
+                    }
+                    return (a.players || 0) - (b.players || 0);
+                });
+            }
+        } catch (error) {
+            console.warn('[Servers] Error during real-time server checks:', error.message);
+            // Continue with cached data if real-time check fails
+        }
         
         const limited = servers.slice(0, limit);
         
