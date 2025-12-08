@@ -101,10 +101,92 @@ app.use(cors());
 app.use(express.json({ limit: '1mb' }));
 app.use(validateRequest);
 
+// Enhanced storage: Indexed by MPS and timestamp for fast queries
 let petFinds = [];
 const MAX_FINDS = 1000;
 const STORAGE_DURATION_HOURS = 1;
 const ALWAYS_SHOW_MINUTES = 10;
+
+// Indexes for fast queries
+const findIndexes = {
+    byMPS: [], // Sorted by MPS descending
+    byTimestamp: [], // Sorted by timestamp descending
+    byJobId: new Map(), // Map of jobId -> finds[]
+    byPlaceId: new Map() // Map of placeId -> finds[]
+};
+
+function addToIndexes(find) {
+    // Add to MPS index (maintain sorted order)
+    const mps = find.mps || 0;
+    let inserted = false;
+    for (let i = 0; i < findIndexes.byMPS.length; i++) {
+        if (mps > (findIndexes.byMPS[i].mps || 0)) {
+            findIndexes.byMPS.splice(i, 0, find);
+            inserted = true;
+            break;
+        }
+    }
+    if (!inserted) {
+        findIndexes.byMPS.push(find);
+    }
+    
+    // Add to timestamp index (newest first)
+    findIndexes.byTimestamp.unshift(find);
+    
+    // Add to jobId index
+    const jobId = find.jobId || '';
+    if (!findIndexes.byJobId.has(jobId)) {
+        findIndexes.byJobId.set(jobId, []);
+    }
+    findIndexes.byJobId.get(jobId).push(find);
+    
+    // Add to placeId index
+    const placeId = find.placeId || 0;
+    if (!findIndexes.byPlaceId.has(placeId)) {
+        findIndexes.byPlaceId.set(placeId, []);
+    }
+    findIndexes.byPlaceId.get(placeId).push(find);
+}
+
+function removeFromIndexes(find) {
+    // Remove from MPS index
+    const mpsIndex = findIndexes.byMPS.indexOf(find);
+    if (mpsIndex > -1) {
+        findIndexes.byMPS.splice(mpsIndex, 1);
+    }
+    
+    // Remove from timestamp index
+    const tsIndex = findIndexes.byTimestamp.indexOf(find);
+    if (tsIndex > -1) {
+        findIndexes.byTimestamp.splice(tsIndex, 1);
+    }
+    
+    // Remove from jobId index
+    const jobId = find.jobId || '';
+    if (findIndexes.byJobId.has(jobId)) {
+        const jobFinds = findIndexes.byJobId.get(jobId);
+        const index = jobFinds.indexOf(find);
+        if (index > -1) {
+            jobFinds.splice(index, 1);
+            if (jobFinds.length === 0) {
+                findIndexes.byJobId.delete(jobId);
+            }
+        }
+    }
+    
+    // Remove from placeId index
+    const placeId = find.placeId || 0;
+    if (findIndexes.byPlaceId.has(placeId)) {
+        const placeFinds = findIndexes.byPlaceId.get(placeId);
+        const index = placeFinds.indexOf(find);
+        if (index > -1) {
+            placeFinds.splice(index, 1);
+            if (placeFinds.length === 0) {
+                findIndexes.byPlaceId.delete(placeId);
+            }
+        }
+    }
+}
 function getFindTimestamp(find) {
     if (find.receivedAt) {
         return new Date(find.receivedAt).getTime();
@@ -120,11 +202,24 @@ function cleanupOldFinds() {
     const oneHourAgo = now - (STORAGE_DURATION_HOURS * 60 * 60 * 1000);
     
     const beforeCleanup = petFinds.length;
+    const toRemove = [];
     
-    petFinds = petFinds.filter(find => {
+    // Find old finds
+    for (const find of petFinds) {
         const findTime = getFindTimestamp(find);
-        return findTime > oneHourAgo;
-    });
+        if (findTime <= oneHourAgo) {
+            toRemove.push(find);
+        }
+    }
+    
+    // Remove from main array and indexes
+    for (const find of toRemove) {
+        const index = petFinds.indexOf(find);
+        if (index > -1) {
+            petFinds.splice(index, 1);
+        }
+        removeFromIndexes(find);
+    }
     
     const afterCleanup = petFinds.length;
 }
@@ -247,6 +342,10 @@ app.post('/api/pet-found', authorize('BOT'), rateLimit, (req, res) => {
         let addedCount = 0;
         let skippedCount = 0;
         let invalidCount = 0;
+        let duplicateCount = 0;
+        
+        // Deduplication: Track unique finds by petName + placeId + jobId + uniqueId
+        const findKeys = new Set();
         
         for (const findData of finds) {
             const validationErrors = validatePetFind(findData);
@@ -270,6 +369,36 @@ app.post('/api/pet-found', authorize('BOT'), rateLimit, (req, res) => {
             }
             
             const generation = findData.generation ? String(findData.generation) : "N/A";
+            const uniqueId = findData.uniqueId ? String(findData.uniqueId) : "";
+            const findKey = `${String(findData.petName).trim()}_${findData.placeId || 0}_${findData.jobId || ""}_${uniqueId}`;
+            
+            // Check for duplicates (within last 5 minutes)
+            const now = Date.now();
+            const fiveMinutesAgo = now - (5 * 60 * 1000);
+            let isDuplicate = false;
+            
+            if (findKeys.has(findKey)) {
+                isDuplicate = true;
+            } else {
+                // Check existing finds for duplicates
+                for (const existingFind of petFinds) {
+                    const existingTime = getFindTimestamp(existingFind);
+                    if (existingTime > fiveMinutesAgo) {
+                        const existingKey = `${existingFind.petName}_${existingFind.placeId}_${existingFind.jobId}_${existingFind.uniqueId || ""}`;
+                        if (existingKey === findKey) {
+                            isDuplicate = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            if (isDuplicate) {
+                duplicateCount++;
+                continue;
+            }
+            
+            findKeys.add(findKey);
             
             const find = {
                 id: Date.now().toString() + "_" + Math.random().toString(36).substr(2, 9),
@@ -283,27 +412,37 @@ app.post('/api/pet-found', authorize('BOT'), rateLimit, (req, res) => {
                 maxPlayers: maxPlayers,
                 accountName: findData.accountName ? String(findData.accountName) : accountName,
                 timestamp: findData.timestamp || Date.now(),
-                receivedAt: new Date().toISOString()
+                receivedAt: new Date().toISOString(),
+                uniqueId: uniqueId
             };
             
             petFinds.unshift(find);
+            addToIndexes(find); // Add to indexes for fast queries
             addedCount++;
         }
         
         cleanupOldFinds();
         
+        // Maintain MAX_FINDS limit, remove oldest from indexes too
         if (petFinds.length > MAX_FINDS) {
+            const toRemove = petFinds.slice(MAX_FINDS);
             petFinds = petFinds.slice(0, MAX_FINDS);
+            for (const find of toRemove) {
+                removeFromIndexes(find);
+            }
         }
         
         if (addedCount > 0) {
-            console.log(`[Pets] ${addedCount} pet(s) sent from ${accountName}`);
+            console.log(`[Pets] ${addedCount} pet(s) sent from ${accountName}${duplicateCount > 0 ? ` (${duplicateCount} duplicates skipped)` : ''}`);
         }
         
         res.status(200).json({ 
             success: true, 
             message: `Received ${addedCount} pet find(s)`,
-            received: addedCount 
+            received: addedCount,
+            skipped: skippedCount,
+            invalid: invalidCount,
+            duplicates: duplicateCount
         });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
@@ -326,10 +465,12 @@ app.get('/api/finds/recent', authorize('GUI'), rateLimit, (req, res) => {
         const oneHourAgo = now - (STORAGE_DURATION_HOURS * 60 * 60 * 1000);
         const tenMinutesAgo = now - (ALWAYS_SHOW_MINUTES * 60 * 1000);
         const limit = Math.min(parseInt(req.query.limit) || 500, 1000);
+        const since = req.query.since ? parseInt(req.query.since) : null; // For incremental updates
         
-        const hourFinds = petFinds.filter(find => {
+        // Use indexed timestamp array for faster filtering (already sorted newest first)
+        let hourFinds = findIndexes.byTimestamp.filter(find => {
             const findTime = getFindTimestamp(find);
-            return findTime > oneHourAgo;
+            return findTime > oneHourAgo && (!since || findTime > since);
         });
         
         const last10Minutes = [];
@@ -344,9 +485,7 @@ app.get('/api/finds/recent', authorize('GUI'), rateLimit, (req, res) => {
             }
         }
         
-        last10Minutes.sort((a, b) => getFindTimestamp(b) - getFindTimestamp(a));
-        olderButWithinHour.sort((a, b) => getFindTimestamp(b) - getFindTimestamp(a));
-        
+        // Already sorted by timestamp (newest first) from index, no need to sort again
         const combined = [...last10Minutes, ...olderButWithinHour].slice(0, limit);
         
         res.json({ 
@@ -354,7 +493,8 @@ app.get('/api/finds/recent', authorize('GUI'), rateLimit, (req, res) => {
             finds: combined, 
             total: combined.length,
             last10Minutes: last10Minutes.length,
-            lastHour: hourFinds.length
+            lastHour: hourFinds.length,
+            timestamp: now // Return current timestamp for incremental updates
         });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
@@ -418,6 +558,9 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         
         let jobIds = [];
         try {
+            // Reload cache to get latest incremental saves
+            jobIdFetcher.loadCache();
+            
             // Use freshest servers if available, otherwise fall back to regular getJobIds
             if (typeof jobIdFetcher.getFreshestJobIds === 'function') {
                 jobIds = jobIdFetcher.getFreshestJobIds(limit * 2); // Get more to filter
@@ -428,6 +571,7 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
                 jobIds = [];
             }
         } catch (getError) {
+            console.error('[Servers] Error getting job IDs:', getError.message);
             jobIds = [];
         }
         
