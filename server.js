@@ -797,15 +797,18 @@ app.get('/', (req, res) => {
     });
 });
 
+// Initialize job fetcher in background - don't block server startup
 if (jobIdFetcher) {
-    try {
-        console.log('[Servers] Loading cache...');
-        jobIdFetcher.loadCache();
-        const cacheInfo = jobIdFetcher.getCacheInfo();
-        console.log(`[Servers] Cache loaded: ${cacheInfo.count} servers`);
-        
-        // Always fetch on startup if cache is empty or low
-        if (cacheInfo.count < 1000) {
+    // Use setImmediate to defer initialization and ensure server starts first
+    setImmediate(() => {
+        try {
+            console.log('[Servers] Loading cache...');
+            jobIdFetcher.loadCache();
+            const cacheInfo = jobIdFetcher.getCacheInfo();
+            console.log(`[Servers] Cache loaded: ${cacheInfo.count} servers`);
+            
+            // Always fetch on startup if cache is empty or low
+            if (cacheInfo.count < 1000) {
             console.log(`[Servers] Cache has ${cacheInfo.count} servers, fetching fresh servers...`);
             // Use async IIFE to wait for initial fetch (but don't block server startup)
             (async () => {
@@ -869,11 +872,13 @@ if (jobIdFetcher) {
                         isFetching = false;
                     });
             });
-        }, 5 * 60 * 1000);
-    } catch (error) {
-        console.error('[Servers] ❌ Initialization error:', error.message);
-        console.error('[Servers] Stack:', error.stack);
-    }
+            }, 5 * 60 * 1000);
+        } catch (error) {
+            console.error('[Servers] ❌ Initialization error:', error.message);
+            console.error('[Servers] Stack:', error.stack);
+            // Don't crash - server should continue running
+        }
+    });
 } else {
     console.warn('[Servers] ⚠️ jobIdFetcher module not available');
 }
@@ -897,22 +902,31 @@ process.on('unhandledRejection', (reason, promise) => {
     // Don't exit - let the server try to continue
 });
 
-app.listen(PORT, '0.0.0.0', () => {
-    console.log('='.repeat(60));
-    console.log(`[Server] ✅ Pet Finder API Server running on port ${PORT}`);
-    console.log(`[Server] Health check: http://localhost:${PORT}/health`);
-    console.log(`[Server] Job IDs endpoint: http://localhost:${PORT}/api/job-ids`);
-    if (jobIdFetcher) {
-        console.log(`[Server] Job ID caching: ENABLED`);
-        try {
-            jobIdFetcher.loadCache();
-            const cacheInfo = jobIdFetcher.getCacheInfo();
-            console.log(`[Server] Cache status: ${cacheInfo.count} servers cached`);
-        } catch (e) {
-            console.log(`[Server] Cache status: Error loading cache - ${e.message}`);
+// Start server - this MUST complete successfully
+try {
+    app.listen(PORT, '0.0.0.0', () => {
+        console.log('='.repeat(60));
+        console.log(`[Server] ✅ Pet Finder API Server running on port ${PORT}`);
+        console.log(`[Server] Health check: http://localhost:${PORT}/health`);
+        console.log(`[Server] Job IDs endpoint: http://localhost:${PORT}/api/job-ids`);
+        if (jobIdFetcher) {
+            console.log(`[Server] Job ID caching: ENABLED`);
+        } else {
+            console.log(`[Server] Job ID caching: DISABLED (module not available)`);
         }
-    } else {
-        console.log(`[Server] Job ID caching: DISABLED (module not available)`);
-    }
-    console.log('='.repeat(60));
-});
+        console.log('='.repeat(60));
+        console.log('[Server] Server is ready to accept connections');
+    }).on('error', (error) => {
+        console.error('[Server] ❌ FATAL: Failed to start server:', error);
+        console.error('[Server] Error code:', error.code);
+        console.error('[Server] Error message:', error.message);
+        if (error.code === 'EADDRINUSE') {
+            console.error('[Server] Port', PORT, 'is already in use');
+        }
+        process.exit(1);
+    });
+} catch (error) {
+    console.error('[Server] ❌ FATAL ERROR starting server:', error);
+    console.error('[Server] Stack:', error.stack);
+    process.exit(1);
+}
