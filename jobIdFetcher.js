@@ -286,17 +286,21 @@ async function fetchBulkJobIds() {
         console.log(`[Fetch] Page ${pagesFetched}: Added ${pageAdded} new job IDs (7/8 or less players), Filtered ${pageFiltered} (${filterSummary}) (Total: ${jobIdCache.jobIds.length}/${MAX_JOB_IDS}, Scanned: ${totalScanned})`);
         
         // Incremental cache save: Save every 100 servers so API can serve them immediately
+        // Use async write to avoid blocking the fetch process
         const currentCount = jobIdCache.jobIds.length;
         if (currentCount - lastSaveCount >= 100) {
-            try {
-                jobIdCache.lastUpdated = new Date().toISOString();
-                jobIdCache.totalFetched = currentCount;
-                fs.writeFileSync(CACHE_FILE, JSON.stringify(jobIdCache, null, 2));
-                console.log(`[Fetch] 💾 Incremental save: Saved ${currentCount} servers to cache (available for API)`);
-                lastSaveCount = currentCount;
-            } catch (saveError) {
-                console.warn(`[Fetch] Failed to save cache incrementally: ${saveError.message}`);
-            }
+            // Save asynchronously to avoid blocking
+            setImmediate(() => {
+                try {
+                    jobIdCache.lastUpdated = new Date().toISOString();
+                    jobIdCache.totalFetched = currentCount;
+                    fs.writeFileSync(CACHE_FILE, JSON.stringify(jobIdCache, null, 2));
+                    console.log(`[Fetch] 💾 Incremental save: Saved ${currentCount} servers to cache (available for API)`);
+                } catch (saveError) {
+                    console.warn(`[Fetch] Failed to save cache incrementally: ${saveError.message}`);
+                }
+            });
+            lastSaveCount = currentCount;
         }
         
         // Stop early if we have enough servers with 7/8 or less players
