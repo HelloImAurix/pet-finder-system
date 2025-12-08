@@ -34,16 +34,37 @@ app.use((req, res, next) => {
             });
         }
     });
+    
+    // Ensure response is sent quickly - don't let long operations block
+    const originalEnd = res.end;
+    res.end = function(...args) {
+        // Clear timeout when response is sent
+        if (req.setTimeout) {
+            req.setTimeout(0);
+        }
+        return originalEnd.apply(this, args);
+    };
+    
     next();
 });
 
 // Health check endpoint (no auth required, responds immediately)
+// This should be super fast - no async operations
 app.get('/health', (req, res) => {
+    // Respond immediately without any async operations
+    const cacheInfo = jobIdFetcher ? (() => {
+        try {
+            return jobIdFetcher.getCacheInfo();
+        } catch (e) {
+            return { count: 0, lastUpdated: null, placeId: 0 };
+        }
+    })() : { count: 0, lastUpdated: null, placeId: 0 };
+    
     res.json({ 
         status: 'ok',
         timestamp: Date.now(),
         isFetching: isFetching,
-        cacheCount: jobIdFetcher ? jobIdFetcher.getCacheInfo().count : 0
+        cacheCount: cacheInfo.count || 0
     });
 });
 
@@ -543,6 +564,9 @@ app.get('/api/finds/all', authorize('ADMIN'), (req, res) => {
 
 
 app.get('/api/job-ids', authorize('BOT'), (req, res) => {
+    // CRITICAL: This endpoint must respond quickly - never block
+    // Use try-catch to ensure we always send a response
+    
     try {
         // CRITICAL: Respond immediately - never block on fetching
         // Always return cached data if available, fetch in background if needed
@@ -566,15 +590,17 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         const limit = parseInt(req.query.limit) || 1000;
         const exclude = req.query.exclude ? req.query.exclude.split(',') : [];
         
-        // Load cache synchronously (fast operation)
+        // Load cache synchronously (fast operation) - wrap in try-catch
+        let cacheInfo;
         try {
             jobIdFetcher.loadCache();
+            cacheInfo = jobIdFetcher.getCacheInfo();
         } catch (cacheError) {
             console.error('[Servers] Cache load error:', cacheError.message);
-            // Continue anyway - might still have in-memory cache
+            // Return safe defaults if cache load fails
+            cacheInfo = { count: 0, lastUpdated: null, placeId: 0 };
         }
         
-        const cacheInfo = jobIdFetcher.getCacheInfo();
         const hasServers = cacheInfo && cacheInfo.count > 0;
         
         // Get servers with full metadata if available (expired servers are automatically filtered)
@@ -618,20 +644,25 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
             const jobIdsOnly = limited.map(s => s.id);
             
             // Trigger background refresh if cache is low or stale, but don't wait for it
+            // Use setImmediate to ensure response is sent first
             if (!isFetching && (cacheInfo.count < 100 || (cacheInfo.lastUpdated && (Date.now() - new Date(cacheInfo.lastUpdated).getTime()) > 300000))) {
-                isFetching = true;
-                console.log('[Servers] Cache is low/stale, triggering background refresh...');
-                // Fire and forget - don't block response
-                jobIdFetcher.fetchBulkJobIds()
-                    .then(result => {
-                        jobIdFetcher.saveCache();
-                        console.log(`[Servers] ✅ Background refresh: ${result.total} servers`);
-                        isFetching = false;
-                    })
-                    .catch(fetchError => {
-                        console.error('[Servers] ❌ Background refresh error:', fetchError.message);
-                        isFetching = false;
-                    });
+                // Defer fetch to next tick so response can be sent first
+                setImmediate(() => {
+                    if (isFetching) return; // Double-check
+                    isFetching = true;
+                    console.log('[Servers] Cache is low/stale, triggering background refresh...');
+                    // Fire and forget - don't block response
+                    jobIdFetcher.fetchBulkJobIds()
+                        .then(result => {
+                            jobIdFetcher.saveCache();
+                            console.log(`[Servers] ✅ Background refresh: ${result.total} servers`);
+                            isFetching = false;
+                        })
+                        .catch(fetchError => {
+                            console.error('[Servers] ❌ Background refresh error:', fetchError.message);
+                            isFetching = false;
+                        });
+                });
             }
             
             return res.json({
@@ -647,19 +678,23 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         
         // No servers available - trigger background fetch if not already fetching
         if (!hasServers && !isFetching) {
-            isFetching = true;
-            console.log('[Servers] Cache is empty, triggering immediate background fetch...');
-            // Fire and forget - respond immediately
-            jobIdFetcher.fetchBulkJobIds()
-                .then(result => {
-                    jobIdFetcher.saveCache();
-                    console.log(`[Servers] ✅ Fetched ${result.total} servers in background`);
-                    isFetching = false;
-                })
-                .catch(fetchError => {
-                    console.error('[Servers] ❌ Background fetch error:', fetchError.message);
-                    isFetching = false;
-                });
+            // Defer fetch to next tick so response can be sent first
+            setImmediate(() => {
+                if (isFetching) return; // Double-check
+                isFetching = true;
+                console.log('[Servers] Cache is empty, triggering immediate background fetch...');
+                // Fire and forget - respond immediately
+                jobIdFetcher.fetchBulkJobIds()
+                    .then(result => {
+                        jobIdFetcher.saveCache();
+                        console.log(`[Servers] ✅ Fetched ${result.total} servers in background`);
+                        isFetching = false;
+                    })
+                    .catch(fetchError => {
+                        console.error('[Servers] ❌ Background fetch error:', fetchError.message);
+                        isFetching = false;
+                    });
+            });
         }
         
         // Return empty response immediately (don't wait for fetch)
@@ -797,26 +832,30 @@ if (jobIdFetcher) {
             console.log(`[Servers] Cache has ${cacheInfo.count} servers, skipping initial fetch`);
         }
         
-        // Auto-refresh every 5 minutes
+        // Auto-refresh every 5 minutes (use setImmediate to avoid blocking)
         setInterval(() => {
             if (isFetching) {
                 console.log('[Servers] Skipping auto-refresh - fetch already in progress');
                 return;
             }
-            isFetching = true;
-            console.log('[Servers] Auto-refreshing cache...');
-            jobIdFetcher.fetchBulkJobIds()
-                .then(result => {
-                    jobIdFetcher.saveCache();
-                    console.log(`[Servers] ✅ Refreshed ${result.total} fresh servers`);
-                    console.log(`[Servers] Added: ${result.added}, Filtered: ${result.filtered}, Scanned: ${result.scanned}`);
-                    isFetching = false;
-                })
-                .catch(error => {
-                    console.error('[Servers] ❌ Auto-refresh error:', error.message);
-                    console.error('[Servers] Stack:', error.stack);
-                    isFetching = false;
-                });
+            // Defer to next tick to avoid blocking
+            setImmediate(() => {
+                if (isFetching) return; // Double-check
+                isFetching = true;
+                console.log('[Servers] Auto-refreshing cache...');
+                jobIdFetcher.fetchBulkJobIds()
+                    .then(result => {
+                        jobIdFetcher.saveCache();
+                        console.log(`[Servers] ✅ Refreshed ${result.total} fresh servers`);
+                        console.log(`[Servers] Added: ${result.added}, Filtered: ${result.filtered}, Scanned: ${result.scanned}`);
+                        isFetching = false;
+                    })
+                    .catch(error => {
+                        console.error('[Servers] ❌ Auto-refresh error:', error.message);
+                        console.error('[Servers] Stack:', error.stack);
+                        isFetching = false;
+                    });
+            });
         }, 5 * 60 * 1000);
     } catch (error) {
         console.error('[Servers] ❌ Initialization error:', error.message);
