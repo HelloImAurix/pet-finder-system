@@ -60,35 +60,22 @@ app.use((req, res, next) => {
 });
 
 // Health check endpoint (no auth required, responds immediately)
-// This should be super fast - no async operations
+// This should be super fast - no async operations, no dependencies
 app.get('/health', (req, res) => {
-    // Respond immediately without any async operations
-    const startTime = Date.now();
-    console.log('[Health] Health check requested from:', req.ip || req.headers['x-forwarded-for'] || 'unknown');
-    
+    // Absolute minimum - just respond immediately
     try {
-        const cacheInfo = jobIdFetcher ? (() => {
-            try {
-                return jobIdFetcher.getCacheInfo();
-            } catch (e) {
-                return { count: 0, lastUpdated: null, placeId: 0 };
-            }
-        })() : { count: 0, lastUpdated: null, placeId: 0 };
-        
-        const response = { 
+        res.json({ 
             status: 'ok',
-            timestamp: Date.now(),
-            isFetching: isFetching,
-            cacheCount: cacheInfo.count || 0,
-            uptime: process.uptime(),
-            port: PORT
-        };
-        
-        res.json(response);
-        console.log('[Health] Response sent in', Date.now() - startTime, 'ms');
+            timestamp: Date.now()
+        });
     } catch (error) {
-        console.error('[Health] Error in health check:', error);
-        res.status(500).json({ status: 'error', error: error.message });
+        // Even if JSON fails, send plain text
+        try {
+            res.status(200).send('ok');
+        } catch (e) {
+            // Last resort
+            res.end();
+        }
     }
 });
 
