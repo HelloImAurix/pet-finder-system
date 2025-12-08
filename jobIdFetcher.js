@@ -151,7 +151,7 @@ async function fetchBulkJobIds() {
     console.log(`[Fetch] Target: ${MAX_JOB_IDS} FRESHEST job IDs, fetching up to ${PAGES_TO_FETCH} pages`);
     console.log(`[Fetch] Sort Order: Desc (newest servers first)`);
     console.log(`[Fetch] Filtering: Only servers with ${MIN_PLAYERS}+ players and not full (players < maxPlayers)`);
-    console.log(`[Fetch] Filtering: Excluding VIP servers and private servers`);
+    console.log(`[Fetch] Filtering: Excluding private servers (VIP check removed - public list only)`);
     console.log(`[Fetch] This will refresh the entire cache with the freshest servers`);
     
     jobIdCache.jobIds = [];
@@ -190,7 +190,7 @@ async function fetchBulkJobIds() {
         
         let pageAdded = 0;
         let pageFiltered = 0;
-        let filterStats = { full: 0, vip: 0, private: 0, invalid: 0, duplicate: 0, tooMany: 0, lowPlayers: 0 };
+        let filterStats = { full: 0, private: 0, invalid: 0, duplicate: 0, tooMany: 0, lowPlayers: 0 };
         let sampleServers = []; // Store first 5 servers for debugging
         
         for (const server of data.data) {
@@ -205,7 +205,6 @@ async function fetchBulkJobIds() {
                     jobId, 
                     players, 
                     maxPlayers, 
-                    vip: server.vipServerId !== null && server.vipServerId !== undefined,
                     private: (server.accessCode !== null && server.accessCode !== undefined) ||
                             (server.PrivateServerId !== null && server.PrivateServerId !== undefined) ||
                             (server.privateServerId !== null && server.privateServerId !== undefined),
@@ -213,8 +212,7 @@ async function fetchBulkJobIds() {
                 });
             }
             
-            // Filter VIP servers
-            const isVipServer = server.vipServerId !== null && server.vipServerId !== undefined;
+            // Note: VIP check removed - we're fetching from public servers list, so VIP servers shouldn't appear anyway
             
             // Filter private servers - check multiple indicators to catch all types:
             // - accessCode: Private servers that require an access code to join
@@ -251,11 +249,7 @@ async function fetchBulkJobIds() {
                 pageFiltered++;
                 continue;
             }
-            if (isVipServer) {
-                filterStats.vip++;
-                pageFiltered++;
-                continue;
-            }
+            // VIP check removed - public servers list shouldn't contain VIP servers
             if (isPrivateServer) {
                 filterStats.private++;
                 pageFiltered++;
@@ -264,10 +258,10 @@ async function fetchBulkJobIds() {
             
             // Server passed all filters
             // Note: We check players < maxPlayers (not <= MAX_PLAYERS) to exclude full servers
+            // VIP check removed - public servers list shouldn't contain VIP servers
             if (jobId && 
                 players >= MIN_PLAYERS && 
                 players < maxPlayers &&  // Exclude full servers (players < maxPlayers)
-                !isVipServer && 
                 !isPrivateServer && 
                 !existingJobIds.has(jobId) && 
                 jobIdCache.jobIds.length < MAX_JOB_IDS) {
@@ -290,7 +284,6 @@ async function fetchBulkJobIds() {
         pagesFetched++;
         const filterDetails = [];
         if (filterStats.full > 0) filterDetails.push(`${filterStats.full} full`);
-        if (filterStats.vip > 0) filterDetails.push(`${filterStats.vip} VIP`);
         if (filterStats.private > 0) filterDetails.push(`${filterStats.private} private`);
         if (filterStats.lowPlayers > 0) filterDetails.push(`${filterStats.lowPlayers} low players`);
         if (filterStats.duplicate > 0) filterDetails.push(`${filterStats.duplicate} duplicate`);
@@ -305,12 +298,12 @@ async function fetchBulkJobIds() {
             console.log(`[Fetch] DEBUG - Sample servers (first ${sampleServers.length}):`);
             sampleServers.forEach((s, i) => {
                 const jobIdShort = s.jobId ? s.jobId.toString().substring(0, 12) + '...' : 'null';
-                console.log(`[Fetch]   ${i+1}. JobId: ${jobIdShort}, Players: ${s.players}/${s.maxPlayers}, Full: ${s.isFull ? 'YES' : 'NO'}, VIP: ${s.vip ? 'YES' : 'NO'}, Private: ${s.private ? 'YES' : 'NO'}`);
+                console.log(`[Fetch]   ${i+1}. JobId: ${jobIdShort}, Players: ${s.players}/${s.maxPlayers}, Full: ${s.isFull ? 'YES' : 'NO'}, Private: ${s.private ? 'YES' : 'NO'}`);
             });
         }
         
         // Reset filter stats for next page
-        filterStats = { full: 0, vip: 0, private: 0, invalid: 0, duplicate: 0, tooMany: 0, lowPlayers: 0 };
+        filterStats = { full: 0, private: 0, invalid: 0, duplicate: 0, tooMany: 0, lowPlayers: 0 };
         sampleServers = [];
         
         cursor = data.nextPageCursor;
@@ -324,7 +317,7 @@ async function fetchBulkJobIds() {
     console.log(`[Fetch] Bulk fetch complete!`);
     console.log(`[Fetch] Total job IDs cached: ${jobIdCache.jobIds.length}/${MAX_JOB_IDS}`);
     console.log(`[Fetch] Fresh servers added: ${totalAdded}`);
-    console.log(`[Fetch] Servers filtered (Full/Private/VIP): ${totalFiltered}`);
+    console.log(`[Fetch] Servers filtered (Full/Private): ${totalFiltered}`);
     console.log(`[Fetch] Total servers scanned: ${totalScanned}`);
     
     if (jobIdCache.jobIds.length < MAX_JOB_IDS) {
