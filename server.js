@@ -795,12 +795,9 @@ app.get('/api/job-ids', authorize('BOT'), async (req, res) => {
             }
             
             // Safety margin: Exclude servers that are very close to full (within 1 slot)
-            // This helps account for potential race conditions where a server fills up
-            if (players >= (maxPlayers - 1) && players > 0) {
-                // Only exclude near-full servers if metadata is stale (might be full now)
-                if (metadataAge > METADATA_MAX_AGE_MS) {
-                    return false;
-                }
+            // Always exclude near-full servers to prevent "server is full" errors
+            if (players >= (maxPlayers - 1)) {
+                return false; // Too close to full - skip it
             }
             
             // Prefer servers with fresher metadata (less likely to be stale/full)
@@ -809,13 +806,10 @@ app.get('/api/job-ids', authorize('BOT'), async (req, res) => {
             server._metadataAge = metadataAge;
             server._isStale = metadataAge > METADATA_STALE_AGE_MS;
             
-            // Extra safety: If metadata is very stale (>10 minutes), be more conservative
-            // Only include if it had low player count when cached
-            if (metadataAge > 10 * 60 * 1000) {
-                // Very stale - only include if it had 3 or fewer players when cached
-                if (players > 3) {
-                    return false;
-                }
+            // Extra safety: If metadata is stale (>2 minutes), be more conservative
+            // Exclude servers with 6+ players if metadata is stale (they might be full now)
+            if (metadataAge > METADATA_MAX_AGE_MS && players >= 6) {
+                return false; // Stale metadata + high player count = likely full
             }
             
             return true;
@@ -837,13 +831,14 @@ app.get('/api/job-ids', authorize('BOT'), async (req, res) => {
             return (a.players || 0) - (b.players || 0);
         });
         
-        // Real-time server status check for top servers (optimized for speed)
-        const serversToCheck = servers.slice(0, Math.min(limit, 15)); // Check top 15 servers
+        // Real-time server status check - verify ALL servers before returning
+        // We need to ensure NO full servers are returned
+        const serversToCheck = servers.slice(0, Math.min(limit * 2, 30)); // Check more to find non-full ones
         
         try {
-            // Fast parallel checks with timeout
-            const checkPromise = checkServerStatusBatch(serversToCheck, 15);
-            const timeoutPromise = new Promise((resolve) => setTimeout(() => resolve([]), 3000)); // 3s timeout
+            // Fast parallel checks with timeout - verify all servers
+            const checkPromise = checkServerStatusBatch(serversToCheck, 30);
+            const timeoutPromise = new Promise((resolve) => setTimeout(() => resolve([]), 4000)); // 4s timeout for more checks
             const checkResults = await Promise.race([checkPromise, timeoutPromise]);
             
             if (Array.isArray(checkResults) && checkResults.length > 0) {
@@ -874,11 +869,27 @@ app.get('/api/job-ids', authorize('BOT'), async (req, res) => {
                         if (!realTimeStatus.available) {
                             return false; // Server is full or unavailable
                         }
+                        
+                        // Double-check: Even if marked available, verify it's not full or near-full
+                        const realPlayers = realTimeStatus.players || 0;
+                        const realMaxPlayers = realTimeStatus.maxPlayers || 8;
+                        if (realPlayers >= realMaxPlayers || realPlayers >= (realMaxPlayers - 1)) {
+                            return false; // Full or too close to full
+                        }
+                        
                         // Update server metadata with real-time data
                         server.players = realTimeStatus.players;
                         server.maxPlayers = realTimeStatus.maxPlayers;
                         server.timestamp = realTimeStatus.timestamp;
                         server._verified = true; // Mark as verified
+                    } else {
+                        // No real-time status - be conservative
+                        // If metadata is stale, exclude servers with high player count
+                        if (server._metadataAge && server._metadataAge > METADATA_MAX_AGE_MS) {
+                            if ((server.players || 0) >= 6) {
+                                return false; // Stale + high player count = risky
+                            }
+                        }
                     }
                     
                     return true;
