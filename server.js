@@ -1,16 +1,9 @@
-// Immediate startup logging - catches errors before anything else
-console.log('='.repeat(60));
-console.log('[Startup] Server process starting...');
-console.log('[Startup] Node version:', process.version);
-console.log('[Startup] Platform:', process.platform);
-console.log('[Startup] Working directory:', __dirname);
-
 const express = require('express');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 
-console.log('[Startup] Core modules loaded');
+console.log('[Startup] Server starting...');
 
 let jobIdFetcher = null;
 let isFetching = false; // Track if a fetch is in progress
@@ -28,25 +21,11 @@ if (fs.existsSync(jobIdFetcherPath)) {
     console.warn('[Servers] Server will continue but job ID caching will be disabled');
 }
 
-console.log('[Startup] Initializing Express app...');
 const app = express();
-// CRITICAL: Railway routing fix
-// Railway's networking is configured to route to port 3000
-// We must listen on port 3000 to match Railway's routing configuration
-// Railway may set PORT=8080 internally, but routes externally to 3000
-const isRailway = !!process.env.RAILWAY_ENVIRONMENT || !!process.env.RAILWAY_SERVICE_NAME || !!process.env.RAILWAY_ENVIRONMENT_NAME;
-// On Railway, always use 3000 (what Railway routes to)
-// Locally, use PORT env var or default to 3000
-const PORT = isRailway ? 3000 : (process.env.PORT ? parseInt(process.env.PORT) : 3000);
-console.log('[Startup] ============================================');
-console.log('[Startup] Detected Railway environment:', isRailway);
-console.log('[Startup] PORT environment variable:', process.env.PORT || 'NOT SET');
-console.log('[Startup] Server will listen on port:', PORT);
-console.log('[Startup] Railway routes to port:', PORT);
-if (isRailway && process.env.PORT && parseInt(process.env.PORT) !== 3000) {
-    console.log('[Startup] ⚠️  Railway set PORT=' + process.env.PORT + ' but routing to 3000 - using 3000');
-}
-console.log('[Startup] ============================================');
+const isRailway = !!process.env.RAILWAY_ENVIRONMENT || !!process.env.RAILWAY_SERVICE_NAME;
+const PORT = isRailway ? 3000 : (parseInt(process.env.PORT) || 3000);
+
+console.log('[Startup] Port:', PORT, '| Railway:', isRailway);
 
 // Add request timeout middleware to prevent Railway timeouts
 app.use((req, res, next) => {
@@ -74,17 +53,8 @@ app.use((req, res, next) => {
     next();
 });
 
-// Health check endpoint (no auth required, responds immediately)
-// Railway uses this to verify the server is alive
-// CRITICAL: This must respond instantly - Railway health checks happen immediately
 app.get('/health', (req, res) => {
-    try {
-        // Absolute minimum - respond immediately, no dependencies, no async
-        res.status(200).json({ status: 'ok', timestamp: Date.now() });
-    } catch (error) {
-        // Even if there's an error, send a response
-        res.status(200).json({ status: 'ok' });
-    }
+    res.status(200).json({ status: 'ok' });
 });
 
 // Root endpoint - respond quickly for Railway health checks
@@ -107,86 +77,26 @@ const API_KEYS = {
     ADMIN: process.env.ADMIN_API_KEY || 'sablujihub-admin'
 };
 
-const requestLogs = new Map();
-
-function logRequest(ip, endpoint, method) {
-    console.log(`[Request] ${method} ${endpoint} from ${ip}`);
-    const key = `${ip}_${endpoint}`;
-    if (!requestLogs.has(key)) {
-        requestLogs.set(key, []);
-    }
-    const logs = requestLogs.get(key);
-    logs.push(Date.now());
-    
-    const recentLogs = logs.filter(time => Date.now() - time < 60000);
-    requestLogs.set(key, recentLogs);
-}
-
 function authorize(requiredKey) {
     return (req, res, next) => {
         const apiKey = req.headers['x-api-key'] 
             || req.headers['authorization']?.replace('Bearer ', '') 
             || req.query.key;
         
-        const ip = req.ip || req.connection.remoteAddress || req.headers['x-forwarded-for']?.split(',')[0] || 'unknown';
-        
         if (!apiKey) {
-            logRequest(ip, req.path, req.method);
-            return res.status(401).json({ 
-                success: false, 
-                error: 'Unauthorized. API key required.' 
-            });
+            return res.status(401).json({ success: false, error: 'Unauthorized. API key required.' });
         }
         
         if (!API_KEYS[requiredKey] || apiKey !== API_KEYS[requiredKey]) {
-            logRequest(ip, req.path, req.method);
-            return res.status(403).json({ 
-                success: false, 
-                error: 'Forbidden. Invalid API key.' 
-            });
+            return res.status(403).json({ success: false, error: 'Forbidden. Invalid API key.' });
         }
         
         next();
     };
 }
 
-function validateRequest(req, res, next) {
-    const ip = req.ip || req.connection.remoteAddress || req.headers['x-forwarded-for']?.split(',')[0] || 'unknown';
-    logRequest(ip, req.path, req.method);
-    
-    if (req.body && typeof req.body === 'object') {
-        const bodySize = JSON.stringify(req.body).length;
-        if (bodySize > 1000000) {
-            return res.status(413).json({ 
-                success: false, 
-                error: 'Request body too large' 
-            });
-        }
-    }
-    
-    next();
-}
-
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
-
-// Add request logging middleware (before validateRequest to catch all)
-app.use((req, res, next) => {
-    const startTime = Date.now();
-    console.log(`[Request] ${req.method} ${req.path} from ${req.ip || req.headers['x-forwarded-for'] || 'unknown'}`);
-    
-    // Log when response is sent
-    const originalSend = res.send;
-    res.send = function(data) {
-        const duration = Date.now() - startTime;
-        console.log(`[Response] ${req.method} ${req.path} - ${res.statusCode} in ${duration}ms`);
-        return originalSend.call(this, data);
-    };
-    
-    next();
-});
-
-app.use(validateRequest);
 
 // Enhanced storage: Indexed by MPS and timestamp for fast queries
 let petFinds = [];
@@ -614,173 +524,73 @@ app.get('/api/finds/all', authorize('ADMIN'), (req, res) => {
 
 
 app.get('/api/job-ids', authorize('BOT'), (req, res) => {
-    // CRITICAL: This endpoint must respond quickly - never block
-    // Use try-catch to ensure we always send a response
-    
-    console.log('[API] /api/job-ids requested - limit:', req.query.limit, 'exclude:', req.query.exclude ? 'yes' : 'no');
-    
     try {
-        // CRITICAL: Respond immediately - never block on fetching
-        // Always return cached data if available, fetch in background if needed
-        
         if (!jobIdFetcher) {
-            console.log('[API] /api/job-ids - jobIdFetcher not available');
             return res.json({ 
                 success: true,
                 jobIds: [],
                 servers: [],
                 count: 0,
                 totalAvailable: 0,
-                cacheInfo: {
-                    count: 0,
-                    lastUpdated: null,
-                    placeId: 0
-                },
-                message: 'Job ID fetcher module not available. Server is running but job ID caching is disabled.'
+                cacheInfo: { count: 0, lastUpdated: null, placeId: 0 },
+                message: 'Job ID fetcher module not available'
             });
         }
         
         const limit = parseInt(req.query.limit) || 1000;
         const exclude = req.query.exclude ? req.query.exclude.split(',') : [];
         
-        // Load cache synchronously (fast operation) - wrap in try-catch
-        let cacheInfo;
+        jobIdFetcher.loadCache();
+        const cacheInfo = jobIdFetcher.getCacheInfo();
+        
+        let servers = [];
         try {
-            jobIdFetcher.loadCache();
-            cacheInfo = jobIdFetcher.getCacheInfo();
-        } catch (cacheError) {
-            console.error('[Servers] Cache load error:', cacheError.message);
-            // Return safe defaults if cache load fails
-            cacheInfo = { count: 0, lastUpdated: null, placeId: 0 };
+            servers = jobIdFetcher.getFreshestServers(limit * 2) || [];
+        } catch (error) {
+            console.error('[Servers] Error getting servers:', error.message);
         }
         
-        const hasServers = cacheInfo && cacheInfo.count > 0;
-        
-        console.log('[API] /api/job-ids - Cache info:', JSON.stringify(cacheInfo));
-        
-        // Get servers with full metadata if available (expired servers are automatically filtered)
-        let serversWithMetadata = [];
-        try {
-            if (typeof jobIdFetcher.getFreshestServers === 'function') {
-                serversWithMetadata = jobIdFetcher.getFreshestServers(limit * 2);
-                console.log('[API] /api/job-ids - Got', serversWithMetadata.length, 'servers from getFreshestServers');
-            } else if (typeof jobIdFetcher.getFreshestJobIds === 'function') {
-                // Fallback: Get job IDs (expired ones are filtered automatically)
-                const jobIds = jobIdFetcher.getFreshestJobIds(limit * 2);
-                const now = Date.now();
-                serversWithMetadata = jobIds.map((id, index) => ({
-                    id: id.toString(),
-                    players: 0,
-                    maxPlayers: 8,
-                    timestamp: now - (index * 1000) // Approximate timestamp
-                }));
-            } else {
-                const jobIds = jobIdFetcher.getJobIds();
-                const now = Date.now();
-                serversWithMetadata = jobIds.map((id, index) => ({
-                    id: id.toString(),
-                    players: 0,
-                    maxPlayers: 8,
-                    timestamp: now - (index * 1000) // Approximate timestamp
-                }));
-            }
-        } catch (getError) {
-            console.error('[Servers] Error getting servers:', getError.message);
-            serversWithMetadata = [];
-        }
-        
-        // Filter out excluded servers
+        // Filter out excluded servers and full servers (players >= maxPlayers)
         const excludeSet = new Set(exclude);
-        serversWithMetadata = serversWithMetadata.filter(server => !excludeSet.has(server.id));
+        servers = servers.filter(server => {
+            if (excludeSet.has(server.id)) return false;
+            // Filter out full servers
+            const players = server.players || 0;
+            const maxPlayers = server.maxPlayers || 8;
+            return players < maxPlayers;
+        });
         
-        // If we have servers, return them immediately (even if cache is being refreshed)
-        if (serversWithMetadata.length > 0) {
-            const totalAvailable = serversWithMetadata.length;
-            const limited = serversWithMetadata.slice(0, limit);
-            const jobIdsOnly = limited.map(s => s.id);
-            
-            console.log('[API] /api/job-ids - Returning', limited.length, 'servers (total available:', totalAvailable, ')');
-            
-            // Trigger background refresh if cache is low or stale, but don't wait for it
-            // Use setImmediate to ensure response is sent first
-            if (!isFetching && (cacheInfo.count < 100 || (cacheInfo.lastUpdated && (Date.now() - new Date(cacheInfo.lastUpdated).getTime()) > 300000))) {
-                console.log('[API] /api/job-ids - Triggering background refresh');
-                // Defer fetch to next tick so response can be sent first
-                setImmediate(() => {
-                    if (isFetching) return; // Double-check
-                    isFetching = true;
-                    console.log('[Servers] Cache is low/stale, triggering background refresh...');
-                    // Fire and forget - don't block response
-                    jobIdFetcher.fetchBulkJobIds()
-                        .then(result => {
-                            jobIdFetcher.saveCache();
-                            console.log(`[Servers] ✅ Background refresh: ${result.total} servers`);
-                            isFetching = false;
-                        })
-                        .catch(fetchError => {
-                            console.error('[Servers] ❌ Background refresh error:', fetchError.message);
-                            isFetching = false;
-                        });
-                });
-            }
-            
-            return res.json({
-                success: true,
-                jobIds: jobIdsOnly, // Backward compatible: flat array
-                servers: limited, // Enhanced: Full objects with metadata
-                count: limited.length,
-                totalAvailable: totalAvailable,
-                cacheInfo: cacheInfo,
-                hasMetadata: limited.length > 0 && (limited[0].players !== undefined || limited[0].timestamp !== undefined)
-            });
-        }
+        const limited = servers.slice(0, limit);
         
-        // No servers available - trigger background fetch if not already fetching
-        if (!hasServers && !isFetching) {
-            console.log('[API] /api/job-ids - No servers in cache, triggering background fetch');
-            // Defer fetch to next tick so response can be sent first
+        // Background refresh if needed
+        if (!isFetching && (cacheInfo.count < 100 || (cacheInfo.lastUpdated && (Date.now() - new Date(cacheInfo.lastUpdated).getTime()) > 300000))) {
             setImmediate(() => {
-                if (isFetching) return; // Double-check
+                if (isFetching) return;
                 isFetching = true;
-                console.log('[Servers] Cache is empty, triggering immediate background fetch...');
-                // Fire and forget - respond immediately
                 jobIdFetcher.fetchBulkJobIds()
                     .then(result => {
                         jobIdFetcher.saveCache();
-                        console.log(`[Servers] ✅ Fetched ${result.total} servers in background`);
+                        console.log(`[Servers] Refreshed: ${result.total} servers`);
                         isFetching = false;
                     })
-                    .catch(fetchError => {
-                        console.error('[Servers] ❌ Background fetch error:', fetchError.message);
+                    .catch(error => {
+                        console.error('[Servers] Refresh error:', error.message);
                         isFetching = false;
                     });
             });
         }
         
-        // Return empty response immediately (don't wait for fetch)
-        console.log('[API] /api/job-ids - Returning empty response (isFetching:', isFetching, ')');
-        const response = {
+        res.json({
             success: true,
-            jobIds: [],
-            servers: [],
-            count: 0,
-            totalAvailable: 0,
-            cacheInfo: cacheInfo,
-            message: isFetching ? 'Cache is being fetched in background. Please retry in a few seconds.' : 'Cache is empty, fetching in background. Please retry in a few seconds.',
-            isFetching: isFetching
-        };
-        console.log('[API] /api/job-ids - Sending response in', Date.now() - startTime, 'ms');
-        return res.json(response);
+            jobIds: limited.map(s => s.id),
+            servers: limited,
+            count: limited.length,
+            totalAvailable: servers.length,
+            cacheInfo: cacheInfo
+        });
     } catch (error) {
-        console.error('[Servers] Error in /api/job-ids:', error);
-        console.error('[Servers] Stack:', error.stack);
-        const errorResponse = { 
-            success: false, 
-            error: error.message,
-            message: 'Internal server error while fetching job IDs'
-        };
-        console.log('[API] /api/job-ids - Sending error response in', Date.now() - startTime, 'ms');
-        res.status(500).json(errorResponse);
+        console.error('[Servers] Error:', error.message);
+        res.status(500).json({ success: false, error: error.message });
     }
 });
 
@@ -808,214 +618,93 @@ app.get('/api/job-ids/info', (req, res) => {
 });
 
 app.post('/api/job-ids/refresh', authorize('ADMIN'), (req, res) => {
-    try {
-        if (!jobIdFetcher) {
-            return res.json({ 
-                success: false,
-                message: 'Job ID fetcher module not available. Cannot refresh cache.'
-            });
-        }
-        
+    if (!jobIdFetcher) {
+        return res.json({ success: false, message: 'Job ID fetcher not available' });
+    }
+    
+    setImmediate(() => {
+        if (isFetching) return;
+        isFetching = true;
         jobIdFetcher.fetchBulkJobIds()
             .then(result => {
                 jobIdFetcher.saveCache();
-                console.log(`[Servers] Fetched ${result.total} servers`);
-                res.json({
-                    success: true,
-                    message: 'Cache refreshed successfully',
-                    ...result
-                });
+                console.log(`[Servers] Refreshed: ${result.total} servers`);
+                isFetching = false;
             })
             .catch(error => {
-                res.status(500).json({ success: false, error: error.message });
+                console.error('[Servers] Refresh error:', error.message);
+                isFetching = false;
             });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
-    }
+    });
+    
+    res.json({ success: true, message: 'Refresh initiated' });
 });
 
-// Root endpoint already defined earlier, no duplicate needed
-
-// Start server FIRST before any cleanup or background tasks
-// This ensures Railway can connect immediately
-
-// Error handling for uncaught exceptions
+// Error handling
 process.on('uncaughtException', (error) => {
-    console.error('[Server] ❌ Uncaught Exception:', error);
-    console.error('[Server] Stack:', error.stack);
-    // Don't exit - let the server try to continue
+    console.error('[Server] Uncaught Exception:', error.message);
 });
 
-process.on('unhandledRejection', (reason, promise) => {
-    console.error('[Server] ❌ Unhandled Rejection at:', promise);
-    console.error('[Server] Reason:', reason);
-    // Don't exit - let the server try to continue
+process.on('unhandledRejection', (reason) => {
+    console.error('[Server] Unhandled Rejection:', reason);
 });
 
-// Start server IMMEDIATELY - this MUST be first, before any background tasks
-// Railway needs the server to be listening ASAP for health checks
 let server = null;
-try {
-    console.log('[Server] Starting server on port', PORT, '...');
-    server = app.listen(PORT, '0.0.0.0', () => {
-        console.log('='.repeat(60));
-        console.log(`[Server] ✅ Pet Finder API Server running on port ${PORT}`);
-        console.log(`[Server] Listening on: 0.0.0.0:${PORT}`);
-        console.log(`[Server] Environment PORT: ${process.env.PORT || 'not set'}`);
-        console.log(`[Server] ⚠️  IMPORTANT: Railway networking MUST route to port ${PORT}`);
-        console.log(`[Server]    If Railway shows a different port in Networking settings,`);
-        console.log(`[Server]    update it to match port ${PORT} or update Railway service settings.`);
-        console.log(`[Server] Health check: http://localhost:${PORT}/health`);
-        console.log(`[Server] Job IDs endpoint: http://localhost:${PORT}/api/job-ids`);
-        if (jobIdFetcher) {
-            console.log(`[Server] Job ID caching: ENABLED`);
-        } else {
-            console.log(`[Server] Job ID caching: DISABLED (module not available)`);
-        }
-        console.log('='.repeat(60));
-        console.log('[Server] Server is ready to accept connections');
-        
-        // Verify server is actually listening and get address info
-        if (server && server.listening) {
-            const addr = server.address();
-            console.log('[Server] ✅ Server confirmed listening');
-            console.log('[Server] Address:', addr);
-            console.log('[Server] Family:', addr.family);
-            console.log('[Server] Port:', addr.port);
-        } else {
-            console.error('[Server] ❌ WARNING: Server may not be listening!');
-        }
-        
-        // Test that we can actually handle a request
-        console.log('[Server] Testing internal health endpoint...');
-        const http = require('http');
-        const testReq = http.get(`http://localhost:${PORT}/health`, (testRes) => {
-            let data = '';
-            testRes.on('data', (chunk) => { data += chunk; });
-            testRes.on('end', () => {
-                console.log('[Server] ✅ Internal health check successful:', testRes.statusCode);
-                console.log('[Server] Response:', data.substring(0, 100));
-            });
-        });
-        testReq.on('error', (err) => {
-            console.error('[Server] ❌ Internal health check failed:', err.message);
-        });
-        testReq.setTimeout(2000, () => {
-            testReq.destroy();
-            console.error('[Server] ❌ Internal health check timed out');
-        });
-    });
-    
-    server.on('error', (error) => {
-        console.error('[Server] ❌ FATAL: Failed to start server:', error);
-        console.error('[Server] Error code:', error.code);
-        console.error('[Server] Error message:', error.message);
-        if (error.code === 'EADDRINUSE') {
-            console.error('[Server] Port', PORT, 'is already in use');
-        }
-        process.exit(1);
-    });
-    
-    server.on('listening', () => {
-        const addr = server.address();
-        console.log('[Server] ✅ Server listening on', addr.address + ':' + addr.port);
-        
-        // Initialize job fetcher AFTER server is confirmed listening
-        if (jobIdFetcher) {
-            setImmediate(() => {
-                try {
-                    console.log('[Servers] Starting job fetcher initialization...');
-                    jobIdFetcher.loadCache();
-                    const cacheInfo = jobIdFetcher.getCacheInfo();
-                    console.log(`[Servers] Cache loaded: ${cacheInfo.count} servers`);
-                    
-                    // Always fetch on startup if cache is empty or low
-                    if (cacheInfo.count < 1000) {
-                        console.log(`[Servers] Cache has ${cacheInfo.count} servers, fetching fresh servers...`);
-                        (async () => {
-                            if (isFetching) {
-                                console.log('[Servers] Fetch already in progress, skipping startup fetch');
-                                return;
-                            }
-                            isFetching = true;
-                            try {
-                                const result = await jobIdFetcher.fetchBulkJobIds();
-                                jobIdFetcher.saveCache();
-                                console.log(`[Servers] ✅ Fetched ${result.total} servers successfully`);
-                                console.log(`[Servers] Added: ${result.added}, Filtered: ${result.filtered}, Scanned: ${result.scanned}`);
-                                isFetching = false;
-                            } catch (error) {
-                                console.error('[Servers] ❌ Initial fetch error:', error.message);
-                                console.error('[Servers] Stack:', error.stack);
-                                isFetching = false;
-                            }
-                        })();
-                    } else {
-                        console.log(`[Servers] Cache has ${cacheInfo.count} servers, skipping initial fetch`);
-                    }
-                    
-                    // Auto-refresh every 5 minutes
-                    setInterval(() => {
-                        if (isFetching) {
-                            console.log('[Servers] Skipping auto-refresh - fetch already in progress');
-                            return;
-                        }
-                        setImmediate(() => {
-                            if (isFetching) return;
-                            isFetching = true;
-                            console.log('[Servers] Auto-refreshing cache...');
-                            jobIdFetcher.fetchBulkJobIds()
-                                .then(result => {
-                                    jobIdFetcher.saveCache();
-                                    console.log(`[Servers] ✅ Refreshed ${result.total} fresh servers`);
-                                    isFetching = false;
-                                })
-                                .catch(error => {
-                                    console.error('[Servers] ❌ Auto-refresh error:', error.message);
-                                    isFetching = false;
-                                });
-                        });
-                    }, 5 * 60 * 1000);
-                } catch (error) {
-                    console.error('[Servers] ❌ Initialization error:', error.message);
-                    console.error('[Servers] Stack:', error.stack);
-                }
-            });
-        }
-    });
-    
-    // Keep server alive - prevent unexpected crashes
-    server.on('close', () => {
-        console.error('[Server] ❌ Server closed unexpectedly!');
-    });
-    
-} catch (error) {
-    console.error('[Server] ❌ FATAL ERROR starting server:', error);
-    console.error('[Server] Stack:', error.stack);
-    process.exit(1);
-}
 
-// Prevent process from exiting
-process.on('SIGTERM', () => {
-    console.log('[Server] SIGTERM received, shutting down gracefully...');
-    if (server) {
-        server.close(() => {
-            console.log('[Server] Server closed');
-            process.exit(0);
+server = app.listen(PORT, '0.0.0.0', () => {
+    console.log(`[Server] Running on port ${PORT}`);
+    
+    if (jobIdFetcher) {
+        setImmediate(() => {
+            jobIdFetcher.loadCache();
+            const cacheInfo = jobIdFetcher.getCacheInfo();
+            
+            if (cacheInfo.count < 1000 && !isFetching) {
+                isFetching = true;
+                jobIdFetcher.fetchBulkJobIds()
+                    .then(result => {
+                        jobIdFetcher.saveCache();
+                        console.log(`[Servers] Fetched ${result.total} servers`);
+                        isFetching = false;
+                    })
+                    .catch(error => {
+                        console.error('[Servers] Fetch error:', error.message);
+                        isFetching = false;
+                    });
+            }
+            
+            // Auto-refresh every 5 minutes
+            setInterval(() => {
+                if (isFetching) return;
+                isFetching = true;
+                jobIdFetcher.fetchBulkJobIds()
+                    .then(result => {
+                        jobIdFetcher.saveCache();
+                        console.log(`[Servers] Auto-refreshed: ${result.total} servers`);
+                        isFetching = false;
+                    })
+                    .catch(error => {
+                        console.error('[Servers] Auto-refresh error:', error.message);
+                        isFetching = false;
+                    });
+            }, 5 * 60 * 1000);
         });
-    } else {
-        process.exit(0);
     }
+});
+
+server.on('error', (error) => {
+    console.error('[Server] Error:', error.message);
+    if (error.code === 'EADDRINUSE') {
+        process.exit(1);
+    }
+});
+
+process.on('SIGTERM', () => {
+    if (server) server.close(() => process.exit(0));
+    else process.exit(0);
 });
 
 process.on('SIGINT', () => {
-    console.log('[Server] SIGINT received, shutting down gracefully...');
-    if (server) {
-        server.close(() => {
-            console.log('[Server] Server closed');
-            process.exit(0);
-        });
-    } else {
-        process.exit(0);
-    }
+    if (server) server.close(() => process.exit(0));
+    else process.exit(0);
 });
