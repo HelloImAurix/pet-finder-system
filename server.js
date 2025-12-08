@@ -3,29 +3,20 @@ const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 
-console.log('[Startup] Server starting...');
-
 let jobIdFetcher = null;
 let isFetching = false;
 const jobIdFetcherPath = path.join(__dirname, 'jobIdFetcher.js');
 if (fs.existsSync(jobIdFetcherPath)) {
     try {
         jobIdFetcher = require('./jobIdFetcher');
-        console.log('[Servers] Job ID fetcher module loaded successfully');
     } catch (error) {
         console.error('[Servers] Failed to load job ID fetcher module:', error.message);
-        console.error('[Servers] Server will continue but job ID caching will be disabled');
     }
-} else {
-    console.warn('[Servers] Job ID fetcher file not found at:', jobIdFetcherPath);
-    console.warn('[Servers] Server will continue but job ID caching will be disabled');
 }
 
 const app = express();
 const isRailway = !!process.env.RAILWAY_ENVIRONMENT || !!process.env.RAILWAY_SERVICE_NAME;
 const PORT = isRailway ? 3000 : (parseInt(process.env.PORT) || 3000);
-
-console.log('[Startup] Port:', PORT, '| Railway:', isRailway);
 
 app.use((req, res, next) => {
     req.setTimeout(25000, () => {
@@ -408,7 +399,7 @@ app.post('/api/pet-found', authorize('BOT'), rateLimit, (req, res) => {
         }
         
         if (addedCount > 0) {
-            console.log(`[Pets] ${addedCount} pet(s) sent from ${accountName}${duplicateCount > 0 ? ` (${duplicateCount} duplicates skipped)` : ''}`);
+            console.log(`[API] Received ${addedCount} pet(s) from ${accountName}`);
         }
         
         res.status(200).json({ 
@@ -524,7 +515,6 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
             const requestLimit = limit > 100 ? limit * 3 : limit * 2;
             servers = jobIdFetcher.getFreshestServers(requestLimit) || [];
         } catch (error) {
-            console.error('[Servers] Error getting servers:', error.message);
         }
         
         const excludeSet = new Set(exclude.filter(id => id && id.length > 0));
@@ -580,13 +570,12 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
                 jobIdFetcher.fetchBulkJobIds()
                     .then(result => {
                         jobIdFetcher.saveCache();
-                        console.log(`[Servers] Refreshed: ${result.total} servers (stale removed, fresh added)`);
+                        console.log(`[API] Cache refreshed: ${result.total} servers available`);
                         isFetching = false;
                     })
                     .catch(error => {
-                        console.error('[Servers] Refresh error:', error.message);
-                        if (error.message && error.message.includes('429')) {
-                            console.log('[Servers] Rate limited - will delay next automatic refresh');
+                        if (error.message && !error.message.includes('429')) {
+                            console.error('[API] Refresh error:', error.message);
                         }
                         isFetching = false;
                     });
@@ -642,11 +631,11 @@ app.post('/api/job-ids/refresh', authorize('ADMIN'), (req, res) => {
         jobIdFetcher.fetchBulkJobIds()
             .then(result => {
                 jobIdFetcher.saveCache();
-                console.log(`[Servers] Manual refresh: ${result.total} servers (stale removed, fresh added)`);
+                console.log(`[API] Manual refresh: ${result.total} servers available`);
                 isFetching = false;
             })
             .catch(error => {
-                console.error('[Servers] Refresh error:', error.message);
+                console.error('[API] Manual refresh error:', error.message);
                 isFetching = false;
             });
     });
@@ -667,7 +656,6 @@ let server = null;
 function startServer() {
     try {
         server = app.listen(PORT, '0.0.0.0', () => {
-            console.log(`[Server] Running on port ${PORT}`);
             
             if (jobIdFetcher) {
                 setImmediate(() => {
@@ -677,31 +665,24 @@ function startServer() {
                     jobIdFetcher.saveCache();
                     
                     const cacheInfo = jobIdFetcher.getCacheInfo();
-                    console.log(`[Servers] Cache loaded: ${cacheInfo.count} servers (after cleanup)`);
-                    
                     if (cacheInfo.count < 1000 && !isFetching) {
                         isFetching = true;
                         jobIdFetcher.fetchBulkJobIds()
                             .then(result => {
                                 jobIdFetcher.saveCache();
-                                console.log(`[Servers] Fetched ${result.total} servers`);
+                                console.log(`[API] Initial fetch: ${result.total} servers cached`);
                                 isFetching = false;
                             })
                             .catch(error => {
-                                console.error('[Servers] Fetch error:', error.message);
+                                console.error('[API] Initial fetch error:', error.message);
                                 isFetching = false;
                             });
                     }
                     
                     setInterval(() => {
                         if (!isFetching) {
-                            const beforeCleanup = jobIdFetcher.getCacheInfo().count;
                             jobIdFetcher.cleanCache();
                             jobIdFetcher.saveCache();
-                            const afterCleanup = jobIdFetcher.getCacheInfo().count;
-                            if (beforeCleanup !== afterCleanup) {
-                                console.log(`[Servers] Cleaned ${beforeCleanup - afterCleanup} expired servers`);
-                            }
                         }
                     }, 60 * 1000);
                     
@@ -713,11 +694,11 @@ function startServer() {
                         jobIdFetcher.fetchBulkJobIds()
                             .then(result => {
                                 jobIdFetcher.saveCache();
-                                console.log(`[Servers] Auto-refreshed: ${result.total} servers (stale removed, fresh added)`);
+                                console.log(`[API] Auto-refresh: ${result.total} servers available`);
                                 isFetching = false;
                             })
                             .catch(error => {
-                                console.error('[Servers] Auto-refresh error:', error.message);
+                                console.error('[API] Auto-refresh error:', error.message);
                                 isFetching = false;
                             });
                     }, 3 * 60 * 1000);
