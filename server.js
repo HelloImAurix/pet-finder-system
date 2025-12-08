@@ -30,8 +30,23 @@ if (fs.existsSync(jobIdFetcherPath)) {
 
 console.log('[Startup] Initializing Express app...');
 const app = express();
-const PORT = process.env.PORT || 3000;
-console.log('[Startup] PORT set to:', PORT);
+// CRITICAL: Railway routing fix
+// Railway's networking is configured to route to port 3000
+// We must listen on port 3000 to match Railway's routing configuration
+// Railway may set PORT=8080 internally, but routes externally to 3000
+const isRailway = !!process.env.RAILWAY_ENVIRONMENT || !!process.env.RAILWAY_SERVICE_NAME || !!process.env.RAILWAY_ENVIRONMENT_NAME;
+// On Railway, always use 3000 (what Railway routes to)
+// Locally, use PORT env var or default to 3000
+const PORT = isRailway ? 3000 : (process.env.PORT ? parseInt(process.env.PORT) : 3000);
+console.log('[Startup] ============================================');
+console.log('[Startup] Detected Railway environment:', isRailway);
+console.log('[Startup] PORT environment variable:', process.env.PORT || 'NOT SET');
+console.log('[Startup] Server will listen on port:', PORT);
+console.log('[Startup] Railway routes to port:', PORT);
+if (isRailway && process.env.PORT && parseInt(process.env.PORT) !== 3000) {
+    console.log('[Startup] ⚠️  Railway set PORT=' + process.env.PORT + ' but routing to 3000 - using 3000');
+}
+console.log('[Startup] ============================================');
 
 // Add request timeout middleware to prevent Railway timeouts
 app.use((req, res, next) => {
@@ -61,9 +76,15 @@ app.use((req, res, next) => {
 
 // Health check endpoint (no auth required, responds immediately)
 // Railway uses this to verify the server is alive
+// CRITICAL: This must respond instantly - Railway health checks happen immediately
 app.get('/health', (req, res) => {
-    // Absolute minimum - respond immediately, no dependencies
-    res.status(200).json({ status: 'ok' });
+    try {
+        // Absolute minimum - respond immediately, no dependencies, no async
+        res.status(200).json({ status: 'ok', timestamp: Date.now() });
+    } catch (error) {
+        // Even if there's an error, send a response
+        res.status(200).json({ status: 'ok' });
+    }
 });
 
 // Root endpoint - respond quickly for Railway health checks
@@ -841,6 +862,9 @@ try {
         console.log(`[Server] ✅ Pet Finder API Server running on port ${PORT}`);
         console.log(`[Server] Listening on: 0.0.0.0:${PORT}`);
         console.log(`[Server] Environment PORT: ${process.env.PORT || 'not set'}`);
+        console.log(`[Server] ⚠️  IMPORTANT: Railway networking MUST route to port ${PORT}`);
+        console.log(`[Server]    If Railway shows a different port in Networking settings,`);
+        console.log(`[Server]    update it to match port ${PORT} or update Railway service settings.`);
         console.log(`[Server] Health check: http://localhost:${PORT}/health`);
         console.log(`[Server] Job IDs endpoint: http://localhost:${PORT}/api/job-ids`);
         if (jobIdFetcher) {
