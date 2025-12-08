@@ -6,7 +6,7 @@ const path = require('path');
 console.log('[Startup] Server starting...');
 
 let jobIdFetcher = null;
-let isFetching = false; // Track if a fetch is in progress
+let isFetching = false;
 const jobIdFetcherPath = path.join(__dirname, 'jobIdFetcher.js');
 if (fs.existsSync(jobIdFetcherPath)) {
     try {
@@ -27,9 +27,7 @@ const PORT = isRailway ? 3000 : (parseInt(process.env.PORT) || 3000);
 
 console.log('[Startup] Port:', PORT, '| Railway:', isRailway);
 
-// Add request timeout middleware to prevent Railway timeouts
 app.use((req, res, next) => {
-    // Set a timeout for all requests (25 seconds - Railway has 30s timeout)
     req.setTimeout(25000, () => {
         if (!res.headersSent) {
             res.status(504).json({
@@ -40,10 +38,8 @@ app.use((req, res, next) => {
         }
     });
     
-    // Ensure response is sent quickly - don't let long operations block
     const originalEnd = res.end;
     res.end = function(...args) {
-        // Clear timeout when response is sent
         if (req.setTimeout) {
             req.setTimeout(0);
         }
@@ -57,7 +53,6 @@ app.get('/health', (req, res) => {
     res.status(200).json({ status: 'ok' });
 });
 
-// Root endpoint - respond quickly for Railway health checks
 app.get('/', (req, res) => {
     res.json({ 
         message: 'Pet Finder API Server',
@@ -98,22 +93,19 @@ function authorize(requiredKey) {
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
 
-// Enhanced storage: Indexed by MPS and timestamp for fast queries
 let petFinds = [];
 const MAX_FINDS = 1000;
 const STORAGE_DURATION_HOURS = 1;
 const ALWAYS_SHOW_MINUTES = 10;
 
-// Indexes for fast queries
 const findIndexes = {
-    byMPS: [], // Sorted by MPS descending
-    byTimestamp: [], // Sorted by timestamp descending
-    byJobId: new Map(), // Map of jobId -> finds[]
-    byPlaceId: new Map() // Map of placeId -> finds[]
+    byMPS: [],
+    byTimestamp: [],
+    byJobId: new Map(),
+    byPlaceId: new Map()
 };
 
 function addToIndexes(find) {
-    // Add to MPS index (maintain sorted order)
     const mps = find.mps || 0;
     let inserted = false;
     for (let i = 0; i < findIndexes.byMPS.length; i++) {
@@ -127,17 +119,14 @@ function addToIndexes(find) {
         findIndexes.byMPS.push(find);
     }
     
-    // Add to timestamp index (newest first)
     findIndexes.byTimestamp.unshift(find);
     
-    // Add to jobId index
     const jobId = find.jobId || '';
     if (!findIndexes.byJobId.has(jobId)) {
         findIndexes.byJobId.set(jobId, []);
     }
     findIndexes.byJobId.get(jobId).push(find);
     
-    // Add to placeId index
     const placeId = find.placeId || 0;
     if (!findIndexes.byPlaceId.has(placeId)) {
         findIndexes.byPlaceId.set(placeId, []);
@@ -146,19 +135,16 @@ function addToIndexes(find) {
 }
 
 function removeFromIndexes(find) {
-    // Remove from MPS index
     const mpsIndex = findIndexes.byMPS.indexOf(find);
     if (mpsIndex > -1) {
         findIndexes.byMPS.splice(mpsIndex, 1);
     }
     
-    // Remove from timestamp index
     const tsIndex = findIndexes.byTimestamp.indexOf(find);
     if (tsIndex > -1) {
         findIndexes.byTimestamp.splice(tsIndex, 1);
     }
     
-    // Remove from jobId index
     const jobId = find.jobId || '';
     if (findIndexes.byJobId.has(jobId)) {
         const jobFinds = findIndexes.byJobId.get(jobId);
@@ -171,7 +157,6 @@ function removeFromIndexes(find) {
         }
     }
     
-    // Remove from placeId index
     const placeId = find.placeId || 0;
     if (findIndexes.byPlaceId.has(placeId)) {
         const placeFinds = findIndexes.byPlaceId.get(placeId);
@@ -201,7 +186,6 @@ function cleanupOldFinds() {
     const beforeCleanup = petFinds.length;
     const toRemove = [];
     
-    // Find old finds
     for (const find of petFinds) {
         const findTime = getFindTimestamp(find);
         if (findTime <= oneHourAgo) {
@@ -209,7 +193,6 @@ function cleanupOldFinds() {
         }
     }
     
-    // Remove from main array and indexes
     for (const find of toRemove) {
         const index = petFinds.indexOf(find);
         if (index > -1) {
@@ -341,7 +324,6 @@ app.post('/api/pet-found', authorize('BOT'), rateLimit, (req, res) => {
         let invalidCount = 0;
         let duplicateCount = 0;
         
-        // Deduplication: Track unique finds by petName + placeId + jobId + uniqueId
         const findKeys = new Set();
         
         for (const findData of finds) {
@@ -353,7 +335,6 @@ app.post('/api/pet-found', authorize('BOT'), rateLimit, (req, res) => {
             
             const playerCount = findData.playerCount || 0;
             const maxPlayers = findData.maxPlayers || 6;
-            // Allow full servers; only skip if clearly invalid (negative or absurd)
             if (playerCount < 0 || playerCount > 50) {
                 skippedCount++;
                 continue;
@@ -369,7 +350,6 @@ app.post('/api/pet-found', authorize('BOT'), rateLimit, (req, res) => {
             const uniqueId = findData.uniqueId ? String(findData.uniqueId) : "";
             const findKey = `${String(findData.petName).trim()}_${findData.placeId || 0}_${findData.jobId || ""}_${uniqueId}`;
             
-            // Check for duplicates (within last 5 minutes)
             const now = Date.now();
             const fiveMinutesAgo = now - (5 * 60 * 1000);
             let isDuplicate = false;
@@ -377,7 +357,6 @@ app.post('/api/pet-found', authorize('BOT'), rateLimit, (req, res) => {
             if (findKeys.has(findKey)) {
                 isDuplicate = true;
             } else {
-                // Check existing finds for duplicates
                 for (const existingFind of petFinds) {
                     const existingTime = getFindTimestamp(existingFind);
                     if (existingTime > fiveMinutesAgo) {
@@ -414,13 +393,12 @@ app.post('/api/pet-found', authorize('BOT'), rateLimit, (req, res) => {
             };
             
             petFinds.unshift(find);
-            addToIndexes(find); // Add to indexes for fast queries
+            addToIndexes(find);
             addedCount++;
         }
         
         cleanupOldFinds();
         
-        // Maintain MAX_FINDS limit, remove oldest from indexes too
         if (petFinds.length > MAX_FINDS) {
             const toRemove = petFinds.slice(MAX_FINDS);
             petFinds = petFinds.slice(0, MAX_FINDS);
@@ -462,9 +440,8 @@ app.get('/api/finds/recent', authorize('GUI'), rateLimit, (req, res) => {
         const oneHourAgo = now - (STORAGE_DURATION_HOURS * 60 * 60 * 1000);
         const tenMinutesAgo = now - (ALWAYS_SHOW_MINUTES * 60 * 1000);
         const limit = Math.min(parseInt(req.query.limit) || 500, 1000);
-        const since = req.query.since ? parseInt(req.query.since) : null; // For incremental updates
+        const since = req.query.since ? parseInt(req.query.since) : null;
         
-        // Use indexed timestamp array for faster filtering (already sorted newest first)
         let hourFinds = findIndexes.byTimestamp.filter(find => {
             const findTime = getFindTimestamp(find);
             return findTime > oneHourAgo && (!since || findTime > since);
@@ -482,7 +459,6 @@ app.get('/api/finds/recent', authorize('GUI'), rateLimit, (req, res) => {
             }
         }
         
-        // Already sorted by timestamp (newest first) from index, no need to sort again
         const combined = [...last10Minutes, ...olderButWithinHour].slice(0, limit);
         
         res.json({ 
@@ -491,7 +467,7 @@ app.get('/api/finds/recent', authorize('GUI'), rateLimit, (req, res) => {
             total: combined.length,
             last10Minutes: last10Minutes.length,
             lastHour: hourFinds.length,
-            timestamp: now // Return current timestamp for incremental updates
+            timestamp: now
         });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
@@ -545,31 +521,24 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         
         let servers = [];
         try {
-            // For bulk requests (limit > 100), request more servers upfront
             const requestLimit = limit > 100 ? limit * 3 : limit * 2;
             servers = jobIdFetcher.getFreshestServers(requestLimit) || [];
         } catch (error) {
             console.error('[Servers] Error getting servers:', error.message);
         }
         
-        // FAST FILTERING: Optimized for bulk requests (100 accounts)
-        // Use Set for O(1) lookup instead of array includes
         const excludeSet = new Set(exclude.filter(id => id && id.length > 0));
         
-        // Single pass filter - trust cache, servers already filtered for full at cache level
         const filtered = [];
         for (const server of servers) {
-            // Skip excluded servers
             if (excludeSet.has(server.id)) continue;
             
-            // Defensive check: double-check full servers (cache should have filtered, but verify)
             const players = server.players || 0;
             const maxPlayers = server.maxPlayers || 8;
-            if (players >= maxPlayers) continue; // Skip full servers
+            if (players >= maxPlayers) continue;
             
             filtered.push(server);
             
-            // Early exit if we have enough for bulk requests
             if (filtered.length >= limit && limit > 100) {
                 break;
             }
@@ -577,9 +546,6 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         
         const limited = filtered.slice(0, limit);
         
-        // Background refresh if needed (cleans stale, adds fresh)
-        // Only refresh if cache is small OR older than 5 minutes, AND no fetch in progress
-        // This prevents overlapping fetches that could cause rate limiting
         if (!isFetching && (cacheInfo.count < 100 || (cacheInfo.lastUpdated && (Date.now() - new Date(cacheInfo.lastUpdated).getTime()) > 300000))) {
             setImmediate(() => {
                 if (isFetching) {
@@ -587,7 +553,6 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
                     return;
                 }
                 isFetching = true;
-                // Clean expired entries before fetching new ones
                 jobIdFetcher.cleanCache();
                 jobIdFetcher.fetchBulkJobIds()
                     .then(result => {
@@ -597,7 +562,6 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
                     })
                     .catch(error => {
                         console.error('[Servers] Refresh error:', error.message);
-                        // If rate limited, wait longer before allowing another fetch
                         if (error.message && error.message.includes('429')) {
                             console.log('[Servers] Rate limited - will delay next automatic refresh');
                         }
@@ -651,7 +615,6 @@ app.post('/api/job-ids/refresh', authorize('ADMIN'), (req, res) => {
     setImmediate(() => {
         if (isFetching) return;
         isFetching = true;
-        // Clean expired entries before fetching new ones
         jobIdFetcher.cleanCache();
         jobIdFetcher.fetchBulkJobIds()
             .then(result => {
@@ -668,7 +631,6 @@ app.post('/api/job-ids/refresh', authorize('ADMIN'), (req, res) => {
     res.json({ success: true, message: 'Refresh initiated (will remove stale servers and add fresh ones)' });
 });
 
-// Error handling
 process.on('uncaughtException', (error) => {
     console.error('[Server] Uncaught Exception:', error.message);
 });
@@ -686,7 +648,6 @@ server = app.listen(PORT, '0.0.0.0', () => {
         setImmediate(() => {
             jobIdFetcher.loadCache();
             
-            // Clean expired entries on startup
             jobIdFetcher.cleanCache();
             jobIdFetcher.saveCache();
             
@@ -707,8 +668,6 @@ server = app.listen(PORT, '0.0.0.0', () => {
                     });
             }
             
-            // Clean expired entries every 2 minutes (more frequent than refresh)
-            // Note: This doesn't make API calls, just cleans in-memory cache
             setInterval(() => {
                 if (!isFetching) {
                     const beforeCleanup = jobIdFetcher.getCacheInfo().count;
@@ -721,9 +680,6 @@ server = app.listen(PORT, '0.0.0.0', () => {
                 }
             }, 2 * 60 * 1000);
             
-            // Auto-refresh every 10 minutes (removes stale, adds fresh)
-            // Increased from 5 to 10 minutes to avoid rate limiting with Roblox API
-            // Full fetch can take 8-10 minutes (100 pages * 6 seconds), so 10 minutes ensures no overlap
             setInterval(() => {
                 if (isFetching) {
                     console.log('[Servers] Skipping auto-refresh - previous fetch still in progress');
@@ -740,7 +696,7 @@ server = app.listen(PORT, '0.0.0.0', () => {
                         console.error('[Servers] Auto-refresh error:', error.message);
                         isFetching = false;
                     });
-            }, 10 * 60 * 1000); // 10 minutes instead of 5
+            }, 10 * 60 * 1000);
         });
     }
 });
