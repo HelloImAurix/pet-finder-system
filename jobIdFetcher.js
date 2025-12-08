@@ -416,6 +416,45 @@ module.exports = {
             return [];
         }
     },
+    getFreshestServers: (limit = 1000) => {
+        try {
+            const ids = jobIdCache.jobIds || [];
+            // Return full server objects with metadata, sorted by timestamp (newest first)
+            const sorted = ids
+                .filter(item => {
+                    if (typeof item === 'string' || typeof item === 'number') return true;
+                    if (typeof item === 'object' && item !== null && item.id) return true;
+                    return false;
+                })
+                .sort((a, b) => {
+                    const tsA = typeof a === 'object' ? (a.timestamp || 0) : Date.now();
+                    const tsB = typeof b === 'object' ? (b.timestamp || 0) : Date.now();
+                    return tsB - tsA; // Newest first
+                })
+                .slice(0, limit)
+                .map(item => {
+                    if (typeof item === 'object' && item !== null) {
+                        return {
+                            id: item.id.toString(),
+                            players: item.players || 0,
+                            maxPlayers: item.maxPlayers || 8,
+                            timestamp: item.timestamp || Date.now()
+                        };
+                    } else {
+                        return {
+                            id: item.toString(),
+                            players: 0,
+                            maxPlayers: 8,
+                            timestamp: Date.now()
+                        };
+                    }
+                });
+            return sorted;
+        } catch (error) {
+            console.error('[Cache] Error getting freshest servers:', error.message);
+            return [];
+        }
+    },
     getCacheInfo: () => {
         try {
             return {
