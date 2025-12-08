@@ -60,13 +60,19 @@ function cleanCache() {
         const maxAge = JOB_ID_MAX_AGE_MS;
         let expiredCount = 0;
         let fullCount = 0;
+        let invalidCount = 0;
         
         jobIdCache.jobIds = jobIdCache.jobIds.filter(item => {
             if (typeof item === 'string' || typeof item === 'number') {
-                return item !== null && item !== undefined && item !== '';
+                if (item === null || item === undefined || item === '') {
+                    invalidCount++;
+                    return false;
+                }
+                return true;
             }
             if (typeof item === 'object' && item !== null) {
                 if (!item.id || item.id === null || item.id === undefined || item.id === '') {
+                    invalidCount++;
                     return false;
                 }
                 const age = now - (item.timestamp || 0);
@@ -80,8 +86,13 @@ function cleanCache() {
                     fullCount++;
                     return false;
                 }
+                if (players < 0 || players > maxPlayers) {
+                    invalidCount++;
+                    return false;
+                }
                 return true;
             }
+            invalidCount++;
             return false;
         });
         
@@ -90,6 +101,7 @@ function cleanCache() {
             const details = [];
             if (expiredCount > 0) details.push(`${expiredCount} expired`);
             if (fullCount > 0) details.push(`${fullCount} full`);
+            if (invalidCount > 0) details.push(`${invalidCount} invalid`);
             const detailStr = details.length > 0 ? ` (${details.join(', ')})` : '';
             console.log(`[Cache] Cleaned ${removedCount} invalid/expired/full entries from cache${detailStr}`);
         }
@@ -303,6 +315,7 @@ async function fetchBulkJobIds() {
             
             if (jobId && 
                 players < maxPlayers &&
+                players >= 0 &&
                 (players === 0 || players >= MIN_PLAYERS) &&
                 !isPrivateServer && 
                 !existingJobIds.has(jobId) && 
@@ -537,6 +550,13 @@ module.exports = {
                         const maxPlayers = item.maxPlayers || 8;
                         if (players >= maxPlayers) return false;
                         
+                        if (players < 0 || players > maxPlayers) return false;
+                        
+                        const isAlmostFull = players >= (maxPlayers - 1) && players < maxPlayers;
+                        if (isAlmostFull && age > 300000) {
+                            return false;
+                        }
+                        
                         return true;
                     }
                     return false;
@@ -544,23 +564,41 @@ module.exports = {
                 .sort((a, b) => {
                     const tsA = typeof a === 'object' ? (a.timestamp || 0) : Date.now();
                     const tsB = typeof b === 'object' ? (b.timestamp || 0) : Date.now();
+                    
+                    const aPlayers = typeof a === 'object' && a !== null ? (a.players || 0) : 0;
+                    const bPlayers = typeof b === 'object' && b !== null ? (b.players || 0) : 0;
+                    const aMaxPlayers = typeof a === 'object' && a !== null ? (a.maxPlayers || 8) : 8;
+                    const bMaxPlayers = typeof b === 'object' && b !== null ? (b.maxPlayers || 8) : 8;
+                    
+                    const aAlmostFull = aPlayers >= (aMaxPlayers - 1) && aPlayers < aMaxPlayers;
+                    const bAlmostFull = bPlayers >= (bMaxPlayers - 1) && bPlayers < bMaxPlayers;
+                    
+                    if (aAlmostFull && !bAlmostFull) return -1;
+                    if (!aAlmostFull && bAlmostFull) return 1;
+                    
+                    if (aPlayers !== bPlayers) return bPlayers - aPlayers;
+                    
                     return tsB - tsA;
                 })
                 .slice(0, limit)
                 .map(item => {
                     if (typeof item === 'object' && item !== null) {
+                        const players = item.players || 0;
+                        const maxPlayers = item.maxPlayers || 8;
                         return {
                             id: item.id.toString(),
-                            players: item.players || 0,
-                            maxPlayers: item.maxPlayers || 8,
-                            timestamp: item.timestamp || Date.now()
+                            players: players,
+                            maxPlayers: maxPlayers,
+                            timestamp: item.timestamp || Date.now(),
+                            isAlmostFull: players >= (maxPlayers - 1) && players < maxPlayers
                         };
                     } else {
                         return {
                             id: item.toString(),
                             players: 0,
                             maxPlayers: 8,
-                            timestamp: Date.now()
+                            timestamp: Date.now(),
+                            isAlmostFull: false
                         };
                     }
                 });
