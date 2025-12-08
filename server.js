@@ -1,7 +1,16 @@
+// Immediate startup logging - catches errors before anything else
+console.log('='.repeat(60));
+console.log('[Startup] Server process starting...');
+console.log('[Startup] Node version:', process.version);
+console.log('[Startup] Platform:', process.platform);
+console.log('[Startup] Working directory:', __dirname);
+
 const express = require('express');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
+
+console.log('[Startup] Core modules loaded');
 
 let jobIdFetcher = null;
 let isFetching = false; // Track if a fetch is in progress
@@ -19,8 +28,10 @@ if (fs.existsSync(jobIdFetcherPath)) {
     console.warn('[Servers] Server will continue but job ID caching will be disabled');
 }
 
+console.log('[Startup] Initializing Express app...');
 const app = express();
 const PORT = process.env.PORT || 3000;
+console.log('[Startup] PORT set to:', PORT);
 
 // Add request timeout middleware to prevent Railway timeouts
 app.use((req, res, next) => {
@@ -830,91 +841,7 @@ app.get('/', (req, res) => {
     });
 });
 
-// Initialize job fetcher in background - don't block server startup
-if (jobIdFetcher) {
-    // Use setImmediate to defer initialization and ensure server starts first
-    setImmediate(() => {
-        try {
-            console.log('[Servers] Loading cache...');
-            jobIdFetcher.loadCache();
-            const cacheInfo = jobIdFetcher.getCacheInfo();
-            console.log(`[Servers] Cache loaded: ${cacheInfo.count} servers`);
-            
-            // Always fetch on startup if cache is empty or low
-            if (cacheInfo.count < 1000) {
-            console.log(`[Servers] Cache has ${cacheInfo.count} servers, fetching fresh servers...`);
-            // Use async IIFE to wait for initial fetch (but don't block server startup)
-            (async () => {
-                if (isFetching) {
-                    console.log('[Servers] Fetch already in progress, skipping startup fetch');
-                    return;
-                }
-                isFetching = true;
-                try {
-                    const result = await jobIdFetcher.fetchBulkJobIds();
-                    jobIdFetcher.saveCache();
-                    console.log(`[Servers] ✅ Fetched ${result.total} servers successfully`);
-                    console.log(`[Servers] Added: ${result.added}, Filtered: ${result.filtered}, Scanned: ${result.scanned}`);
-                    isFetching = false;
-                } catch (error) {
-                    console.error('[Servers] ❌ Initial fetch error:', error.message);
-                    console.error('[Servers] Stack:', error.stack);
-                    isFetching = false;
-                    // Retry after 10 seconds
-                    setTimeout(async () => {
-                        if (isFetching) return;
-                        isFetching = true;
-                        try {
-                            console.log('[Servers] Retrying fetch after error...');
-                            const result = await jobIdFetcher.fetchBulkJobIds();
-                            jobIdFetcher.saveCache();
-                            console.log(`[Servers] ✅ Retry successful: ${result.total} servers`);
-                            isFetching = false;
-                        } catch (retryError) {
-                            console.error('[Servers] ❌ Retry failed:', retryError.message);
-                            isFetching = false;
-                        }
-                    }, 10000);
-                }
-            })();
-        } else {
-            console.log(`[Servers] Cache has ${cacheInfo.count} servers, skipping initial fetch`);
-        }
-        
-        // Auto-refresh every 5 minutes (use setImmediate to avoid blocking)
-        setInterval(() => {
-            if (isFetching) {
-                console.log('[Servers] Skipping auto-refresh - fetch already in progress');
-                return;
-            }
-            // Defer to next tick to avoid blocking
-            setImmediate(() => {
-                if (isFetching) return; // Double-check
-                isFetching = true;
-                console.log('[Servers] Auto-refreshing cache...');
-                jobIdFetcher.fetchBulkJobIds()
-                    .then(result => {
-                        jobIdFetcher.saveCache();
-                        console.log(`[Servers] ✅ Refreshed ${result.total} fresh servers`);
-                        console.log(`[Servers] Added: ${result.added}, Filtered: ${result.filtered}, Scanned: ${result.scanned}`);
-                        isFetching = false;
-                    })
-                    .catch(error => {
-                        console.error('[Servers] ❌ Auto-refresh error:', error.message);
-                        console.error('[Servers] Stack:', error.stack);
-                        isFetching = false;
-                    });
-            });
-            }, 5 * 60 * 1000);
-        } catch (error) {
-            console.error('[Servers] ❌ Initialization error:', error.message);
-            console.error('[Servers] Stack:', error.stack);
-            // Don't crash - server should continue running
-        }
-    });
-} else {
-    console.warn('[Servers] ⚠️ jobIdFetcher module not available');
-}
+// Job fetcher initialization moved to server.on('listening') below
 
 setInterval(() => {
     cleanupOldFinds();
@@ -936,10 +863,12 @@ process.on('unhandledRejection', (reason, promise) => {
 });
 
 // Start server - this MUST complete successfully
+let server = null;
 try {
-    app.listen(PORT, '0.0.0.0', () => {
+    server = app.listen(PORT, '0.0.0.0', () => {
         console.log('='.repeat(60));
         console.log(`[Server] ✅ Pet Finder API Server running on port ${PORT}`);
+        console.log(`[Server] Listening on: 0.0.0.0:${PORT}`);
         console.log(`[Server] Health check: http://localhost:${PORT}/health`);
         console.log(`[Server] Job IDs endpoint: http://localhost:${PORT}/api/job-ids`);
         if (jobIdFetcher) {
@@ -949,7 +878,16 @@ try {
         }
         console.log('='.repeat(60));
         console.log('[Server] Server is ready to accept connections');
-    }).on('error', (error) => {
+        
+        // Verify server is actually listening
+        if (server && server.listening) {
+            console.log('[Server] ✅ Server confirmed listening on port', PORT);
+        } else {
+            console.error('[Server] ❌ WARNING: Server may not be listening!');
+        }
+    });
+    
+    server.on('error', (error) => {
         console.error('[Server] ❌ FATAL: Failed to start server:', error);
         console.error('[Server] Error code:', error.code);
         console.error('[Server] Error message:', error.message);
@@ -958,8 +896,107 @@ try {
         }
         process.exit(1);
     });
+    
+    server.on('listening', () => {
+        const addr = server.address();
+        console.log('[Server] ✅ Server listening on', addr.address + ':' + addr.port);
+        
+        // Initialize job fetcher AFTER server is confirmed listening
+        if (jobIdFetcher) {
+            setImmediate(() => {
+                try {
+                    console.log('[Servers] Starting job fetcher initialization...');
+                    jobIdFetcher.loadCache();
+                    const cacheInfo = jobIdFetcher.getCacheInfo();
+                    console.log(`[Servers] Cache loaded: ${cacheInfo.count} servers`);
+                    
+                    // Always fetch on startup if cache is empty or low
+                    if (cacheInfo.count < 1000) {
+                        console.log(`[Servers] Cache has ${cacheInfo.count} servers, fetching fresh servers...`);
+                        (async () => {
+                            if (isFetching) {
+                                console.log('[Servers] Fetch already in progress, skipping startup fetch');
+                                return;
+                            }
+                            isFetching = true;
+                            try {
+                                const result = await jobIdFetcher.fetchBulkJobIds();
+                                jobIdFetcher.saveCache();
+                                console.log(`[Servers] ✅ Fetched ${result.total} servers successfully`);
+                                console.log(`[Servers] Added: ${result.added}, Filtered: ${result.filtered}, Scanned: ${result.scanned}`);
+                                isFetching = false;
+                            } catch (error) {
+                                console.error('[Servers] ❌ Initial fetch error:', error.message);
+                                console.error('[Servers] Stack:', error.stack);
+                                isFetching = false;
+                            }
+                        })();
+                    } else {
+                        console.log(`[Servers] Cache has ${cacheInfo.count} servers, skipping initial fetch`);
+                    }
+                    
+                    // Auto-refresh every 5 minutes
+                    setInterval(() => {
+                        if (isFetching) {
+                            console.log('[Servers] Skipping auto-refresh - fetch already in progress');
+                            return;
+                        }
+                        setImmediate(() => {
+                            if (isFetching) return;
+                            isFetching = true;
+                            console.log('[Servers] Auto-refreshing cache...');
+                            jobIdFetcher.fetchBulkJobIds()
+                                .then(result => {
+                                    jobIdFetcher.saveCache();
+                                    console.log(`[Servers] ✅ Refreshed ${result.total} fresh servers`);
+                                    isFetching = false;
+                                })
+                                .catch(error => {
+                                    console.error('[Servers] ❌ Auto-refresh error:', error.message);
+                                    isFetching = false;
+                                });
+                        });
+                    }, 5 * 60 * 1000);
+                } catch (error) {
+                    console.error('[Servers] ❌ Initialization error:', error.message);
+                    console.error('[Servers] Stack:', error.stack);
+                }
+            });
+        }
+    });
+    
+    // Keep server alive - prevent unexpected crashes
+    server.on('close', () => {
+        console.error('[Server] ❌ Server closed unexpectedly!');
+    });
+    
 } catch (error) {
     console.error('[Server] ❌ FATAL ERROR starting server:', error);
     console.error('[Server] Stack:', error.stack);
     process.exit(1);
 }
+
+// Prevent process from exiting
+process.on('SIGTERM', () => {
+    console.log('[Server] SIGTERM received, shutting down gracefully...');
+    if (server) {
+        server.close(() => {
+            console.log('[Server] Server closed');
+            process.exit(0);
+        });
+    } else {
+        process.exit(0);
+    }
+});
+
+process.on('SIGINT', () => {
+    console.log('[Server] SIGINT received, shutting down gracefully...');
+    if (server) {
+        server.close(() => {
+            console.log('[Server] Server closed');
+            process.exit(0);
+        });
+    } else {
+        process.exit(0);
+    }
+});
