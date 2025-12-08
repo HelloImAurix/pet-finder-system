@@ -190,11 +190,14 @@ async function fetchBulkJobIds() {
         
         let pageAdded = 0;
         let pageFiltered = 0;
+        let filterStats = { full: 0, vip: 0, private: 0, invalid: 0, duplicate: 0, tooMany: 0, lowPlayers: 0 };
+        
         for (const server of data.data) {
             totalScanned++;
             const jobId = server.id;
             const players = server.playing || 0;
             const maxPlayers = server.maxPlayers || 6;
+            
             // Filter VIP servers
             const isVipServer = server.vipServerId !== null && server.vipServerId !== undefined;
             
@@ -206,13 +209,44 @@ async function fetchBulkJobIds() {
                                    (server.PrivateServerId !== null && server.PrivateServerId !== undefined) ||
                                    (server.privateServerId !== null && server.privateServerId !== undefined);
             
-            // Filter criteria:
-            // 1. Must have at least MIN_PLAYERS
-            // 2. Must have less than MAX_PLAYERS (not full)
-            // 3. Must not be a VIP server
-            // 4. Must not be a private server (with access code or PrivateServerId)
-            // 5. Must not already be in cache
-            // 6. Must have valid jobId
+            // Track why servers are filtered (for debugging)
+            if (!jobId) {
+                filterStats.invalid++;
+                pageFiltered++;
+                continue;
+            }
+            if (existingJobIds.has(jobId)) {
+                filterStats.duplicate++;
+                pageFiltered++;
+                continue;
+            }
+            if (jobIdCache.jobIds.length >= MAX_JOB_IDS) {
+                filterStats.tooMany++;
+                pageFiltered++;
+                continue;
+            }
+            if (players < MIN_PLAYERS) {
+                filterStats.lowPlayers++;
+                pageFiltered++;
+                continue;
+            }
+            if (players > MAX_PLAYERS) {
+                filterStats.full++;
+                pageFiltered++;
+                continue;
+            }
+            if (isVipServer) {
+                filterStats.vip++;
+                pageFiltered++;
+                continue;
+            }
+            if (isPrivateServer) {
+                filterStats.private++;
+                pageFiltered++;
+                continue;
+            }
+            
+            // Server passed all filters
             if (jobId && 
                 players >= MIN_PLAYERS && 
                 players <= MAX_PLAYERS && 
@@ -237,7 +271,20 @@ async function fetchBulkJobIds() {
         }
         
         pagesFetched++;
-        console.log(`[Fetch] Page ${pagesFetched}: Added ${pageAdded} new job IDs, Filtered ${pageFiltered} (Full/Private/VIP/Invalid) (Total: ${jobIdCache.jobIds.length}/${MAX_JOB_IDS}, Scanned: ${totalScanned})`);
+        const filterDetails = [];
+        if (filterStats.full > 0) filterDetails.push(`${filterStats.full} full`);
+        if (filterStats.vip > 0) filterDetails.push(`${filterStats.vip} VIP`);
+        if (filterStats.private > 0) filterDetails.push(`${filterStats.private} private`);
+        if (filterStats.lowPlayers > 0) filterDetails.push(`${filterStats.lowPlayers} low players`);
+        if (filterStats.duplicate > 0) filterDetails.push(`${filterStats.duplicate} duplicate`);
+        if (filterStats.invalid > 0) filterDetails.push(`${filterStats.invalid} invalid`);
+        if (filterStats.tooMany > 0) filterDetails.push(`${filterStats.tooMany} cache full`);
+        
+        const filterSummary = filterDetails.length > 0 ? filterDetails.join(', ') : 'none';
+        console.log(`[Fetch] Page ${pagesFetched}: Added ${pageAdded} new job IDs, Filtered ${pageFiltered} (${filterSummary}) (Total: ${jobIdCache.jobIds.length}/${MAX_JOB_IDS}, Scanned: ${totalScanned})`);
+        
+        // Reset filter stats for next page
+        filterStats = { full: 0, vip: 0, private: 0, invalid: 0, duplicate: 0, tooMany: 0, lowPlayers: 0 };
         
         cursor = data.nextPageCursor;
         if (!cursor) {
