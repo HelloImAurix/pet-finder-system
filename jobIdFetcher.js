@@ -5,11 +5,11 @@ const path = require('path');
 const PLACE_ID = parseInt(process.env.PLACE_ID, 10) || 109983668079237;
 const CACHE_FILE = path.join(__dirname, 'jobIds_cache.json');
 const MAX_JOB_IDS = parseInt(process.env.MAX_JOB_IDS || '1000', 10);
-const PAGES_TO_FETCH = parseInt(process.env.PAGES_TO_FETCH || '100', 10); // Fetch many pages to find servers with 7/8 or less
-const DELAY_BETWEEN_REQUESTS = parseInt(process.env.DELAY_BETWEEN_REQUESTS || '6000', 10); // 6 seconds between requests to avoid Roblox rate limits (conservative)
+const PAGES_TO_FETCH = parseInt(process.env.PAGES_TO_FETCH || '100', 10);
+const DELAY_BETWEEN_REQUESTS = parseInt(process.env.DELAY_BETWEEN_REQUESTS || '6000', 10);
 const MIN_PLAYERS = parseInt(process.env.MIN_PLAYERS || '1', 10);
-const MAX_PLAYERS = parseInt(process.env.MAX_PLAYERS || '6', 10); // Exclude full servers (7+ players, max is usually 6)
-const JOB_ID_MAX_AGE_MS = parseInt(process.env.JOB_ID_MAX_AGE_MS || '600000', 10); // 10 minutes - Roblox servers expire after inactivity
+const MAX_PLAYERS = parseInt(process.env.MAX_PLAYERS || '6', 10);
+const JOB_ID_MAX_AGE_MS = parseInt(process.env.JOB_ID_MAX_AGE_MS || '600000', 10);
 let jobIdCache = {
     jobIds: [],
     lastUpdated: null,
@@ -25,7 +25,7 @@ function loadCache() {
             if (parsed && Array.isArray(parsed.jobIds)) {
                 jobIdCache = parsed;
                 const originalLength = jobIdCache.jobIds.length;
-                cleanCache(); // Clean cache on load to remove any invalid entries
+                cleanCache();
                 if (originalLength !== jobIdCache.jobIds.length) {
                     console.log(`[Cache] Cleaned ${originalLength - jobIdCache.jobIds.length} invalid entries on load`);
                 }
@@ -54,8 +54,6 @@ function loadCache() {
 }
 
 function cleanCache() {
-    // Remove any invalid entries, expired job IDs, and full servers
-    // Handle both old format (strings) and new format (objects with timestamps)
     if (Array.isArray(jobIdCache.jobIds)) {
         const originalLength = jobIdCache.jobIds.length;
         const now = Date.now();
@@ -64,31 +62,25 @@ function cleanCache() {
         let fullCount = 0;
         
         jobIdCache.jobIds = jobIdCache.jobIds.filter(item => {
-            // Check validity
             if (typeof item === 'string' || typeof item === 'number') {
-                // Old format - keep for backward compatibility, but consider them potentially stale
                 return item !== null && item !== undefined && item !== '';
             }
             if (typeof item === 'object' && item !== null) {
-                // New format - check validity and expiration
                 if (!item.id || item.id === null || item.id === undefined || item.id === '') {
                     return false;
                 }
-                // Check if expired
                 const age = now - (item.timestamp || 0);
                 if (age >= maxAge) {
                     expiredCount++;
-                    return false; // Expired
+                    return false;
                 }
-                // CRITICAL: Remove full servers (players >= maxPlayers)
-                // This ensures we never serve full servers even if they somehow got cached
                 const players = item.players || 0;
                 const maxPlayers = item.maxPlayers || 8;
                 if (players >= maxPlayers) {
                     fullCount++;
-                    return false; // Full server
+                    return false;
                 }
-                return true; // Valid, not expired, and has available slots
+                return true;
             }
             return false;
         });
@@ -106,7 +98,7 @@ function cleanCache() {
 
 function saveCache() {
     try {
-        cleanCache(); // Clean before saving
+        cleanCache();
         jobIdCache.lastUpdated = new Date().toISOString();
         fs.writeFileSync(CACHE_FILE, JSON.stringify(jobIdCache, null, 2));
         console.log(`[Cache] Saved ${jobIdCache.jobIds.length} job IDs to cache`);
@@ -134,7 +126,6 @@ function makeRequest(url) {
                         reject(new Error(`Failed to parse JSON: ${error.message}`));
                     }
                 } else if (res.statusCode === 429) {
-                    // Rate limited - return null to trigger retry logic
                     reject(new Error(`HTTP 429: Rate limited`));
                 } else {
                     reject(new Error(`HTTP ${res.statusCode}: ${data.substring(0, 200)}`));
@@ -154,8 +145,6 @@ function makeRequest(url) {
 }
 
 async function fetchPage(cursor = null, retryCount = 0) {
-    // CRITICAL: excludeFullGames=true tells Roblox API to exclude full servers at the API level
-    // We also filter client-side as a backup (defensive programming)
     let url = `https://games.roblox.com/v1/games/${PLACE_ID}/servers/Public?sortOrder=Desc&limit=100&excludeFullGames=true`;
     if (cursor) {
         url += `&cursor=${cursor}`;
@@ -165,10 +154,9 @@ async function fetchPage(cursor = null, retryCount = 0) {
         const data = await makeRequest(url);
         return data;
     } catch (error) {
-        // Handle rate limiting (429) with exponential backoff
         if (error.message.includes('429') || error.message.includes('Rate limited')) {
             if (retryCount < 3) {
-                const backoffDelay = Math.min(10000 * Math.pow(2, retryCount), 60000); // Max 60 seconds
+                const backoffDelay = Math.min(10000 * Math.pow(2, retryCount), 60000);
                 console.log(`[Fetch] Rate limited, waiting ${backoffDelay/1000}s before retry (${retryCount + 1}/3)...`);
                 await new Promise(resolve => setTimeout(resolve, backoffDelay));
                 return fetchPage(cursor, retryCount + 1);
@@ -177,7 +165,6 @@ async function fetchPage(cursor = null, retryCount = 0) {
                 return null;
             }
         }
-        // Handle timeout errors
         if (error.message.includes('timeout')) {
             if (retryCount < 2) {
                 console.log(`[Fetch] Timeout, retrying (${retryCount + 1}/2)...`);
@@ -202,16 +189,13 @@ async function fetchBulkJobIds() {
     console.log(`[Fetch] Only servers with available slots (7/8 or less) will be cached`);
     console.log(`[Fetch] Incremental caching: Will save cache every 100 servers for immediate availability`);
     
-    // Clean expired entries first, then keep non-expired ones
     const now = Date.now();
     const maxAge = JOB_ID_MAX_AGE_MS;
     const beforeCleanup = jobIdCache.jobIds.length;
     const existingValidIds = new Set();
     
-    // Filter out expired entries and build a map of valid existing servers
     const validExistingServers = jobIdCache.jobIds.filter(item => {
         if (typeof item === 'string' || typeof item === 'number') {
-            // Old format - keep but mark as potentially stale
             const id = String(item);
             if (existingValidIds.has(id)) return false;
             existingValidIds.add(id);
@@ -220,14 +204,14 @@ async function fetchBulkJobIds() {
         if (typeof item === 'object' && item !== null && item.id) {
             const age = now - (item.timestamp || 0);
             if (age >= maxAge) {
-                return false; // Expired
+                return false;
             }
             const id = String(item.id);
-            if (existingValidIds.has(id)) return false; // Duplicate
+            if (existingValidIds.has(id)) return false;
             existingValidIds.add(id);
-            return true; // Valid and not expired
+            return true;
         }
-        return false; // Invalid format
+        return false;
     });
     
     const expiredCount = beforeCleanup - validExistingServers.length;
@@ -236,24 +220,19 @@ async function fetchBulkJobIds() {
     }
     console.log(`[Fetch] Keeping ${validExistingServers.length} valid non-expired servers`);
     
-    // Start with valid existing servers, then add new ones
     jobIdCache.jobIds = [...validExistingServers];
-    const existingJobIds = new Set(existingValidIds); // Track all IDs (existing + new) to avoid duplicates
+    const existingJobIds = new Set(existingValidIds);
     let cursor = null;
     let pagesFetched = 0;
     let totalAdded = 0;
     let totalScanned = 0;
     let totalFiltered = 0;
-    let lastSaveCount = 0; // Track when we last saved
+    let lastSaveCount = 0;
     
-    // Stop fetching if we have enough servers OR if we've checked enough pages
-    // Note: Roblox API doesn't support filtering by player count, so we fetch all and filter client-side
     while (pagesFetched < PAGES_TO_FETCH && jobIdCache.jobIds.length < MAX_JOB_IDS) {
-        // Yield to event loop every iteration to keep server responsive
         await new Promise(resolve => setImmediate(resolve));
         
         if (pagesFetched > 0) {
-            // Respect rate limits - wait between requests to avoid 429 errors
             await new Promise(resolve => setTimeout(resolve, DELAY_BETWEEN_REQUESTS));
         }
         
@@ -263,12 +242,10 @@ async function fetchBulkJobIds() {
             data = await fetchPage(cursor, 0);
         } catch (error) {
             console.error(`[Fetch] Error on page ${pagesFetched + 1}:`, error.message);
-            // If rate limited, wait longer before continuing
             if (error.message.includes('429') || error.message.includes('Too many requests')) {
                 console.log(`[Fetch] Rate limited, waiting 30 seconds before continuing...`);
                 await new Promise(resolve => setTimeout(resolve, 30000));
             }
-            // Continue to next page instead of breaking
             pagesFetched++;
             continue;
         }
@@ -288,10 +265,6 @@ async function fetchBulkJobIds() {
             const players = server.playing || 0;
             const maxPlayers = server.maxPlayers || 6;
             
-            // Filter private servers - check multiple indicators to catch all types:
-            // - accessCode: Private servers that require an access code to join
-            // - PrivateServerId: Private server identifier (capitalized property)
-            // - privateServerId: Private server identifier (camelCase property)
             const isPrivateServer = (server.accessCode !== null && server.accessCode !== undefined) ||
                                    (server.PrivateServerId !== null && server.PrivateServerId !== undefined) ||
                                    (server.privateServerId !== null && server.privateServerId !== undefined);
@@ -311,16 +284,11 @@ async function fetchBulkJobIds() {
                 pageFiltered++;
                 continue;
             }
-            // Allow empty servers (players === 0) - they might have slots available
-            // Only filter if players < MIN_PLAYERS AND players > 0 (empty servers are allowed)
             if (players > 0 && players < MIN_PLAYERS) {
                 filterStats.lowPlayers++;
                 pageFiltered++;
                 continue;
             }
-            // CRITICAL: Exclude full servers - only allow servers with available slots
-            // Players must be strictly less than maxPlayers (7/8 allowed, 8/8 rejected)
-            // This is a backup check in case excludeFullGames=true API parameter fails
             if (players >= maxPlayers) {
                 filterStats.full++;
                 pageFiltered++;
@@ -333,17 +301,12 @@ async function fetchBulkJobIds() {
                 continue;
             }
             
-            // Server passed all filters - FINAL CHECK: ensure not full
-            // Double-check that server is not full (defensive programming in case API parameter fails)
-            // Only allow servers with players < maxPlayers (7/8 or less, not 8/8)
-            // Allow empty servers (players === 0) as they have slots available
             if (jobId && 
-                players < maxPlayers &&  // CRITICAL: Only allow servers with available slots (players < maxPlayers)
-                (players === 0 || players >= MIN_PLAYERS) &&  // Allow empty servers or servers with min players
+                players < maxPlayers &&
+                (players === 0 || players >= MIN_PLAYERS) &&
                 !isPrivateServer && 
                 !existingJobIds.has(jobId) && 
                 jobIdCache.jobIds.length < MAX_JOB_IDS) {
-                // Store with timestamp for freshness tracking
                 jobIdCache.jobIds.push({
                     id: jobId,
                     timestamp: Date.now(),
@@ -371,11 +334,8 @@ async function fetchBulkJobIds() {
         const filterSummary = filterDetails.length > 0 ? filterDetails.join(', ') : 'none';
         console.log(`[Fetch] Page ${pagesFetched}: Added ${pageAdded} new job IDs (7/8 or less players), Filtered ${pageFiltered} (${filterSummary}) (Total: ${jobIdCache.jobIds.length}/${MAX_JOB_IDS}, Scanned: ${totalScanned})`);
         
-        // Incremental cache save: Save every 100 servers so API can serve them immediately
-        // Use async write to avoid blocking the fetch process
         const currentCount = jobIdCache.jobIds.length;
         if (currentCount - lastSaveCount >= 100) {
-            // Save asynchronously to avoid blocking - but wait for it to complete
             await new Promise((resolve) => {
                 setImmediate(() => {
                     try {
@@ -392,16 +352,13 @@ async function fetchBulkJobIds() {
             lastSaveCount = currentCount;
         }
         
-        // Yield to event loop after processing each page to keep server responsive
         await new Promise(resolve => setImmediate(resolve));
         
-        // Stop early if we have enough servers with 7/8 or less players
         if (jobIdCache.jobIds.length >= MAX_JOB_IDS) {
             console.log(`[Fetch] ✅ Reached target of ${MAX_JOB_IDS} servers with 7/8 or less players, stopping fetch early`);
             break;
         }
         
-        // Reset filter stats for next page
         filterStats = { full: 0, private: 0, invalid: 0, duplicate: 0, tooMany: 0, lowPlayers: 0 };
         
         cursor = data.nextPageCursor;
@@ -411,22 +368,19 @@ async function fetchBulkJobIds() {
         }
     }
     
-    // Sort all servers by timestamp (newest first) and limit to MAX_JOB_IDS
     const beforeSort = jobIdCache.jobIds.length;
     jobIdCache.jobIds.sort((a, b) => {
         const tsA = typeof a === 'object' && a !== null ? (a.timestamp || 0) : Date.now();
         const tsB = typeof b === 'object' && b !== null ? (b.timestamp || 0) : Date.now();
-        return tsB - tsA; // Newest first
+        return tsB - tsA;
     });
     
-    // Limit to MAX_JOB_IDS, keeping only the freshest
     if (jobIdCache.jobIds.length > MAX_JOB_IDS) {
         const removed = jobIdCache.jobIds.length - MAX_JOB_IDS;
         jobIdCache.jobIds = jobIdCache.jobIds.slice(0, MAX_JOB_IDS);
         console.log(`[Fetch] Limited cache to ${MAX_JOB_IDS} freshest servers (removed ${removed} older entries)`);
     }
     
-    // Final cleanup: Remove any expired entries one more time (in case any slipped through)
     const finalBeforeCleanup = jobIdCache.jobIds.length;
     jobIdCache.jobIds = jobIdCache.jobIds.filter(item => {
         if (typeof item === 'string' || typeof item === 'number') return true;
@@ -454,7 +408,6 @@ async function fetchBulkJobIds() {
     if (jobIdCache.jobIds.length === 0) {
         console.log(`[Fetch] ⚠️  WARNING: No servers found with 7/8 or less players after scanning ${totalScanned} servers across ${pagesFetched} pages`);
         console.log(`[Fetch] All servers appear to be full (8/8). The game may be at capacity.`);
-        console.log(`[Fetch] Note: Roblox API doesn't support filtering by player count - we must fetch and filter client-side`);
     } else if (jobIdCache.jobIds.length < MAX_JOB_IDS) {
         console.log(`[Fetch] ⚠️  Warning: Only cached ${jobIdCache.jobIds.length} job IDs, target was ${MAX_JOB_IDS}`);
         console.log(`[Fetch] Consider increasing PAGES_TO_FETCH (currently ${PAGES_TO_FETCH}) if you need more servers`);
@@ -510,7 +463,6 @@ module.exports = {
     getJobIds: () => {
         try {
             const ids = jobIdCache.jobIds || [];
-            // Convert to array of job IDs, handling both old format (strings) and new format (objects)
             return ids.map(item => {
                 if (typeof item === 'string' || typeof item === 'number') return item;
                 if (typeof item === 'object' && item !== null && item.id) return item.id;
@@ -527,30 +479,25 @@ module.exports = {
             const now = Date.now();
             const maxAge = JOB_ID_MAX_AGE_MS;
             
-            // Filter out expired job IDs and sort by timestamp (newest first)
             const sorted = ids
                 .filter(item => {
-                    // Check if item is valid
                     if (typeof item === 'string' || typeof item === 'number') {
-                        // Old format - assume it's still valid (no timestamp)
                         return true;
                     }
                     if (typeof item === 'object' && item !== null && item.id) {
-                        // New format - check if expired
                         const age = now - (item.timestamp || 0);
-                        return age < maxAge; // Only return if less than max age
+                        return age < maxAge;
                     }
                     return false;
                 })
                 .sort((a, b) => {
                     const tsA = typeof a === 'object' ? (a.timestamp || 0) : Date.now();
                     const tsB = typeof b === 'object' ? (b.timestamp || 0) : Date.now();
-                    return tsB - tsA; // Newest first
+                    return tsB - tsA;
                 })
                 .slice(0, limit)
                 .map(item => typeof item === 'object' ? item.id : item);
             
-            // Clean up expired entries from cache
             const beforeCleanup = jobIdCache.jobIds.length;
             jobIdCache.jobIds = jobIdCache.jobIds.filter(item => {
                 if (typeof item === 'string' || typeof item === 'number') return true;
@@ -577,24 +524,18 @@ module.exports = {
             const now = Date.now();
             const maxAge = JOB_ID_MAX_AGE_MS;
             
-            // Filter out expired job IDs and full servers, return full server objects with metadata
             const sorted = ids
                 .filter(item => {
-                    // Check if item is valid and not expired
                     if (typeof item === 'string' || typeof item === 'number') {
-                        // Old format - assume it's still valid (no timestamp, no player count)
                         return true;
                     }
                     if (typeof item === 'object' && item !== null && item.id) {
-                        // New format - check if expired
                         const age = now - (item.timestamp || 0);
-                        if (age >= maxAge) return false; // Expired
+                        if (age >= maxAge) return false;
                         
-                        // CRITICAL: Filter out full servers (players >= maxPlayers)
-                        // This is a defensive check in case any full servers somehow got cached
                         const players = item.players || 0;
                         const maxPlayers = item.maxPlayers || 8;
-                        if (players >= maxPlayers) return false; // Full server
+                        if (players >= maxPlayers) return false;
                         
                         return true;
                     }
@@ -603,7 +544,7 @@ module.exports = {
                 .sort((a, b) => {
                     const tsA = typeof a === 'object' ? (a.timestamp || 0) : Date.now();
                     const tsB = typeof b === 'object' ? (b.timestamp || 0) : Date.now();
-                    return tsB - tsA; // Newest first
+                    return tsB - tsA;
                 })
                 .slice(0, limit)
                 .map(item => {
@@ -624,7 +565,6 @@ module.exports = {
                     }
                 });
             
-            // Clean up expired entries from cache
             const beforeCleanup = jobIdCache.jobIds.length;
             jobIdCache.jobIds = jobIdCache.jobIds.filter(item => {
                 if (typeof item === 'string' || typeof item === 'number') return true;
