@@ -1,603 +1,419 @@
-const express = require('express');
-const cors = require('cors');
+const https = require('https');
 const fs = require('fs');
 const path = require('path');
 
-let jobIdFetcher = null;
-const jobIdFetcherPath = path.join(__dirname, 'jobIdFetcher.js');
-if (fs.existsSync(jobIdFetcherPath)) {
-    try {
-        jobIdFetcher = require('./jobIdFetcher');
-    } catch (error) {
-    }
-}
-
-const app = express();
-const PORT = process.env.PORT || 3000;
-
-const API_KEYS = {
-    BOT: process.env.BOT_API_KEY || 'sablujihub-bot',
-    GUI: process.env.GUI_API_KEY || 'sablujihub-gui',
-    ADMIN: process.env.ADMIN_API_KEY || 'sablujihub-admin'
+const PLACE_ID = parseInt(process.env.PLACE_ID, 10) || 109983668079237;
+const CACHE_FILE = path.join(__dirname, 'jobIds_cache.json');
+const MAX_JOB_IDS = parseInt(process.env.MAX_JOB_IDS || '1000', 10);
+const PAGES_TO_FETCH = parseInt(process.env.PAGES_TO_FETCH || '100', 10); // Fetch many pages to find servers with 7/8 or less
+const DELAY_BETWEEN_REQUESTS = parseInt(process.env.DELAY_BETWEEN_REQUESTS || '5000', 10); // Increased to 5 seconds to avoid rate limits
+const MIN_PLAYERS = parseInt(process.env.MIN_PLAYERS || '1', 10);
+const MAX_PLAYERS = parseInt(process.env.MAX_PLAYERS || '6', 10); // Exclude full servers (7+ players, max is usually 6)
+let jobIdCache = {
+    jobIds: [],
+    lastUpdated: null,
+    placeId: PLACE_ID,
+    totalFetched: 0
 };
 
-const requestLogs = new Map();
-
-function logRequest(ip, endpoint, method) {
-    console.log(`[Request] ${method} ${endpoint} from ${ip}`);
-    const key = `${ip}_${endpoint}`;
-    if (!requestLogs.has(key)) {
-        requestLogs.set(key, []);
+function loadCache() {
+    try {
+        if (fs.existsSync(CACHE_FILE)) {
+            const data = fs.readFileSync(CACHE_FILE, 'utf8');
+            const parsed = JSON.parse(data);
+            if (parsed && Array.isArray(parsed.jobIds)) {
+                jobIdCache = parsed;
+                const originalLength = jobIdCache.jobIds.length;
+                cleanCache(); // Clean cache on load to remove any invalid entries
+                if (originalLength !== jobIdCache.jobIds.length) {
+                    console.log(`[Cache] Cleaned ${originalLength - jobIdCache.jobIds.length} invalid entries on load`);
+                }
+                console.log(`[Cache] Loaded ${jobIdCache.jobIds.length} job IDs from cache`);
+                return true;
+            } else {
+                console.warn('[Cache] Cache file has invalid structure, resetting...');
+                jobIdCache = {
+                    jobIds: [],
+                    lastUpdated: null,
+                    placeId: PLACE_ID,
+                    totalFetched: 0
+                };
+            }
+        }
+    } catch (error) {
+        console.warn('[Cache] Failed to load cache:', error.message);
+        jobIdCache = {
+            jobIds: [],
+            lastUpdated: null,
+            placeId: PLACE_ID,
+            totalFetched: 0
+        };
     }
-    const logs = requestLogs.get(key);
-    logs.push(Date.now());
-    
-    const recentLogs = logs.filter(time => Date.now() - time < 60000);
-    requestLogs.set(key, recentLogs);
+    return false;
 }
 
-function authorize(requiredKey) {
-    return (req, res, next) => {
-        const apiKey = req.headers['x-api-key'] 
-            || req.headers['authorization']?.replace('Bearer ', '') 
-            || req.query.key;
-        
-        const ip = req.ip || req.connection.remoteAddress || req.headers['x-forwarded-for']?.split(',')[0] || 'unknown';
-        
-        if (!apiKey) {
-            logRequest(ip, req.path, req.method);
-            return res.status(401).json({ 
-                success: false, 
-                error: 'Unauthorized. API key required.' 
+function cleanCache() {
+    // Remove any invalid entries and ensure we only have valid job IDs
+    // Handle both old format (strings) and new format (objects with timestamps)
+    if (Array.isArray(jobIdCache.jobIds)) {
+        const originalLength = jobIdCache.jobIds.length;
+        jobIdCache.jobIds = jobIdCache.jobIds.filter(item => {
+            if (typeof item === 'string' || typeof item === 'number') {
+                return item !== null && item !== undefined && item !== '';
+            }
+            if (typeof item === 'object' && item !== null) {
+                return item.id !== null && item.id !== undefined && item.id !== '';
+            }
+            return false;
+        });
+        if (originalLength !== jobIdCache.jobIds.length) {
+            console.log(`[Cache] Cleaned ${originalLength - jobIdCache.jobIds.length} invalid entries from cache`);
+        }
+    }
+}
+
+function saveCache() {
+    try {
+        cleanCache(); // Clean before saving
+        jobIdCache.lastUpdated = new Date().toISOString();
+        fs.writeFileSync(CACHE_FILE, JSON.stringify(jobIdCache, null, 2));
+        console.log(`[Cache] Saved ${jobIdCache.jobIds.length} job IDs to cache`);
+        return true;
+    } catch (error) {
+        console.error('[Cache] Failed to save cache:', error.message);
+        return false;
+    }
+}
+
+function makeRequest(url) {
+    return new Promise((resolve, reject) => {
+        const request = https.get(url, (res) => {
+            let data = '';
+            
+            res.on('data', (chunk) => {
+                data += chunk;
             });
+            
+            res.on('end', () => {
+                if (res.statusCode === 200) {
+                    try {
+                        resolve(JSON.parse(data));
+                    } catch (error) {
+                        reject(new Error(`Failed to parse JSON: ${error.message}`));
+                    }
+                } else {
+                    reject(new Error(`HTTP ${res.statusCode}: ${data.substring(0, 200)}`));
+                }
+            });
+        });
+        
+        // Add timeout (30 seconds)
+        request.setTimeout(30000, () => {
+            request.destroy();
+            reject(new Error('Request timeout after 30 seconds'));
+        });
+        
+        request.on('error', (error) => {
+            reject(new Error(`Request failed: ${error.message}`));
+        });
+    });
+}
+
+async function fetchPage(cursor = null, retryCount = 0) {
+    let url = `https://games.roblox.com/v1/games/${PLACE_ID}/servers/Public?sortOrder=Desc&limit=100&excludeFullGames=true`;
+    if (cursor) {
+        url += `&cursor=${cursor}`;
+    }
+    
+    try {
+        const data = await makeRequest(url);
+        return data;
+    } catch (error) {
+        // Handle rate limiting (429) with exponential backoff
+        if (error.message.includes('429') || error.message.includes('Too many requests')) {
+            if (retryCount < 3) {
+                const backoffDelay = Math.min(10000 * Math.pow(2, retryCount), 60000); // Max 60 seconds
+                console.log(`[Fetch] Rate limited, waiting ${backoffDelay/1000}s before retry (${retryCount + 1}/3)...`);
+                await new Promise(resolve => setTimeout(resolve, backoffDelay));
+                return fetchPage(cursor, retryCount + 1);
+            } else {
+                console.error(`[Fetch] Rate limited after ${retryCount + 1} retries, giving up`);
+                return null;
+            }
+        }
+        console.error(`[Fetch] Error fetching page:`, error.message);
+        return null;
+    }
+}
+
+async function fetchBulkJobIds() {
+    console.log(`[Fetch] Starting bulk fetch for place ID: ${PLACE_ID}`);
+    console.log(`[Fetch] Target: ${MAX_JOB_IDS} FRESHEST job IDs, fetching up to ${PAGES_TO_FETCH} pages`);
+    console.log(`[Fetch] Sort Order: Desc (newest servers first)`);
+    console.log(`[Fetch] Using excludeFullGames=true parameter to exclude full servers at API level`);
+    console.log(`[Fetch] Filtering: Only caching servers with 7/8 or less players (players < maxPlayers)`);
+    console.log(`[Fetch] Filtering: Excluding private servers (VIP check removed - public list only)`);
+    console.log(`[Fetch] Only servers with available slots (7/8 or less) will be cached`);
+    
+    jobIdCache.jobIds = [];
+    const existingJobIds = new Set();
+    let cursor = null;
+    let pagesFetched = 0;
+    let totalAdded = 0;
+    let totalScanned = 0;
+    let totalFiltered = 0;
+    
+    // Stop fetching if we have enough servers OR if we've checked enough pages
+    // Note: Roblox API doesn't support filtering by player count, so we fetch all and filter client-side
+    while (pagesFetched < PAGES_TO_FETCH && jobIdCache.jobIds.length < MAX_JOB_IDS) {
+        if (pagesFetched > 0) {
+            await new Promise(resolve => setTimeout(resolve, DELAY_BETWEEN_REQUESTS));
         }
         
-        if (!API_KEYS[requiredKey] || apiKey !== API_KEYS[requiredKey]) {
-            logRequest(ip, req.path, req.method);
-            return res.status(403).json({ 
-                success: false, 
-                error: 'Forbidden. Invalid API key.' 
-            });
+        console.log(`[Fetch] Fetching page ${pagesFetched + 1}...`);
+        let data;
+        try {
+            data = await fetchPage(cursor, 0);
+        } catch (error) {
+            console.error(`[Fetch] Error on page ${pagesFetched + 1}:`, error.message);
+            // If rate limited, wait longer before continuing
+            if (error.message.includes('429') || error.message.includes('Too many requests')) {
+                console.log(`[Fetch] Rate limited, waiting 30 seconds before continuing...`);
+                await new Promise(resolve => setTimeout(resolve, 30000));
+            }
+            // Continue to next page instead of breaking
+            pagesFetched++;
+            continue;
         }
         
-        next();
+        if (!data || !data.data || data.data.length === 0) {
+            console.log(`[Fetch] No more data available from API`);
+            break;
+        }
+        
+        let pageAdded = 0;
+        let pageFiltered = 0;
+        let filterStats = { full: 0, private: 0, invalid: 0, duplicate: 0, tooMany: 0, lowPlayers: 0 };
+        
+        for (const server of data.data) {
+            totalScanned++;
+            const jobId = server.id;
+            const players = server.playing || 0;
+            const maxPlayers = server.maxPlayers || 6;
+            
+            // Filter private servers - check multiple indicators to catch all types:
+            // - accessCode: Private servers that require an access code to join
+            // - PrivateServerId: Private server identifier (capitalized property)
+            // - privateServerId: Private server identifier (camelCase property)
+            const isPrivateServer = (server.accessCode !== null && server.accessCode !== undefined) ||
+                                   (server.PrivateServerId !== null && server.PrivateServerId !== undefined) ||
+                                   (server.privateServerId !== null && server.privateServerId !== undefined);
+            
+            if (!jobId) {
+                filterStats.invalid++;
+                pageFiltered++;
+                continue;
+            }
+            if (existingJobIds.has(jobId)) {
+                filterStats.duplicate++;
+                pageFiltered++;
+                continue;
+            }
+            if (jobIdCache.jobIds.length >= MAX_JOB_IDS) {
+                filterStats.tooMany++;
+                pageFiltered++;
+                continue;
+            }
+            // Allow empty servers (players === 0) - they might have slots available
+            // Only filter if players < MIN_PLAYERS AND players > 0 (empty servers are allowed)
+            if (players > 0 && players < MIN_PLAYERS) {
+                filterStats.lowPlayers++;
+                pageFiltered++;
+                continue;
+            }
+            // Exclude full servers: Only allow servers with players < maxPlayers (7/8 or less)
+            // This means: 7/8 = allowed, 8/8 = filtered out
+            if (players >= maxPlayers) {
+                filterStats.full++;
+                pageFiltered++;
+                continue;
+            }
+            
+            if (isPrivateServer) {
+                filterStats.private++;
+                pageFiltered++;
+                continue;
+            }
+            
+            // Server passed all filters
+            // Only allow servers with players < maxPlayers (7/8 or less, not 8/8)
+            // Allow empty servers (players === 0) as they have slots available
+            // VIP check removed - public servers list shouldn't contain VIP servers
+            if (jobId && 
+                (players === 0 || players >= MIN_PLAYERS) &&  // Allow empty servers or servers with min players
+                players < maxPlayers &&  // Only allow 7/8 or less (players < maxPlayers means 7 < 8, not 8 < 8)
+                !isPrivateServer && 
+                !existingJobIds.has(jobId) && 
+                jobIdCache.jobIds.length < MAX_JOB_IDS) {
+                // Store with timestamp for freshness tracking
+                jobIdCache.jobIds.push({
+                    id: jobId,
+                    timestamp: Date.now(),
+                    players: players,
+                    maxPlayers: maxPlayers
+                });
+                existingJobIds.add(jobId);
+                pageAdded++;
+                totalAdded++;
+            } else {
+                pageFiltered++;
+                totalFiltered++;
+            }
+        }
+        
+        pagesFetched++;
+        const filterDetails = [];
+        if (filterStats.full > 0) filterDetails.push(`${filterStats.full} full`);
+        if (filterStats.private > 0) filterDetails.push(`${filterStats.private} private`);
+        if (filterStats.lowPlayers > 0) filterDetails.push(`${filterStats.lowPlayers} low players`);
+        if (filterStats.duplicate > 0) filterDetails.push(`${filterStats.duplicate} duplicate`);
+        if (filterStats.invalid > 0) filterDetails.push(`${filterStats.invalid} invalid`);
+        if (filterStats.tooMany > 0) filterDetails.push(`${filterStats.tooMany} cache full`);
+        
+        const filterSummary = filterDetails.length > 0 ? filterDetails.join(', ') : 'none';
+        console.log(`[Fetch] Page ${pagesFetched}: Added ${pageAdded} new job IDs (7/8 or less players), Filtered ${pageFiltered} (${filterSummary}) (Total: ${jobIdCache.jobIds.length}/${MAX_JOB_IDS}, Scanned: ${totalScanned})`);
+        
+        // Stop early if we have enough servers with 7/8 or less players
+        if (jobIdCache.jobIds.length >= MAX_JOB_IDS) {
+            console.log(`[Fetch] ✅ Reached target of ${MAX_JOB_IDS} servers with 7/8 or less players, stopping fetch early`);
+            break;
+        }
+        
+        // Reset filter stats for next page
+        filterStats = { full: 0, private: 0, invalid: 0, duplicate: 0, tooMany: 0, lowPlayers: 0 };
+        
+        cursor = data.nextPageCursor;
+        if (!cursor) {
+            console.log(`[Fetch] No more pages available`);
+            break;
+        }
+    }
+    
+    jobIdCache.totalFetched = jobIdCache.jobIds.length;
+    console.log(`[Fetch] Bulk fetch complete!`);
+    console.log(`[Fetch] Total job IDs cached: ${jobIdCache.jobIds.length}/${MAX_JOB_IDS}`);
+    console.log(`[Fetch] Fresh servers added: ${totalAdded}`);
+    console.log(`[Fetch] Servers filtered (Full/Private): ${totalFiltered}`);
+    console.log(`[Fetch] Total servers scanned: ${totalScanned}`);
+    console.log(`[Fetch] Pages fetched: ${pagesFetched}`);
+    
+    if (jobIdCache.jobIds.length === 0) {
+        console.log(`[Fetch] ⚠️  WARNING: No servers found with 7/8 or less players after scanning ${totalScanned} servers across ${pagesFetched} pages`);
+        console.log(`[Fetch] All servers appear to be full (8/8). The game may be at capacity.`);
+        console.log(`[Fetch] Note: Roblox API doesn't support filtering by player count - we must fetch and filter client-side`);
+    } else if (jobIdCache.jobIds.length < MAX_JOB_IDS) {
+        console.log(`[Fetch] ⚠️  Warning: Only cached ${jobIdCache.jobIds.length} job IDs, target was ${MAX_JOB_IDS}`);
+        console.log(`[Fetch] Consider increasing PAGES_TO_FETCH (currently ${PAGES_TO_FETCH}) if you need more servers`);
+    } else {
+        console.log(`[Fetch] ✅ Success: Cached full ${MAX_JOB_IDS} job IDs!`);
+    }
+    
+    return {
+        total: jobIdCache.jobIds.length,
+        added: totalAdded,
+        filtered: totalFiltered,
+        scanned: totalScanned
     };
 }
 
-function validateRequest(req, res, next) {
-    const ip = req.ip || req.connection.remoteAddress || req.headers['x-forwarded-for']?.split(',')[0] || 'unknown';
-    logRequest(ip, req.path, req.method);
+async function main() {
+    console.log('='.repeat(60));
+    console.log('Roblox Job ID Bulk Fetcher');
+    console.log('='.repeat(60));
     
-    if (req.body && typeof req.body === 'object') {
-        const bodySize = JSON.stringify(req.body).length;
-        if (bodySize > 1000000) {
-            return res.status(413).json({ 
-                success: false, 
-                error: 'Request body too large' 
-            });
-        }
+    loadCache();
+    
+    const result = await fetchBulkJobIds();
+    
+    if (saveCache()) {
+        console.log('\n[Success] Cache saved successfully!');
+        console.log(`[Stats] Total job IDs: ${result.total}`);
+        console.log(`[Stats] New job IDs: ${result.added}`);
+        console.log(`[Stats] Servers scanned: ${result.scanned}`);
+        console.log(`[Cache] File location: ${CACHE_FILE}`);
+    } else {
+        console.error('\n[Error] Failed to save cache!');
+        process.exit(1);
     }
     
-    next();
+    console.log('\n' + '='.repeat(60));
+    console.log('Done! You can now use the cached job IDs in your Lua script.');
+    console.log('='.repeat(60));
 }
 
-app.use(cors());
-app.use(express.json({ limit: '1mb' }));
-app.use(validateRequest);
-
-let petFinds = [];
-const MAX_FINDS = 1000;
-const STORAGE_DURATION_HOURS = 1;
-const ALWAYS_SHOW_MINUTES = 10;
-function getFindTimestamp(find) {
-    if (find.receivedAt) {
-        return new Date(find.receivedAt).getTime();
-    }
-    if (find.timestamp) {
-        const ts = typeof find.timestamp === 'number' ? find.timestamp : parseInt(find.timestamp);
-        return ts < 10000000000 ? ts * 1000 : ts;
-    }
-    return Date.now();
-}
-function cleanupOldFinds() {
-    const now = Date.now();
-    const oneHourAgo = now - (STORAGE_DURATION_HOURS * 60 * 60 * 1000);
-    
-    const beforeCleanup = petFinds.length;
-    
-    petFinds = petFinds.filter(find => {
-        const findTime = getFindTimestamp(find);
-        return findTime > oneHourAgo;
+if (require.main === module) {
+    main().catch(error => {
+        console.error('[Fatal Error]', error);
+        process.exit(1);
     });
-    
-    const afterCleanup = petFinds.length;
 }
 
-const rateLimitStore = new Map();
-
-function rateLimit(req, res, next) {
-    const ip = req.ip || req.connection.remoteAddress || req.headers['x-forwarded-for']?.split(',')[0] || 'unknown';
-    const now = Date.now();
-    
-    if (!rateLimitStore.has(ip)) {
-        rateLimitStore.set(ip, { count: 1, resetTime: now + 10000 });
-        return next();
-    }
-    
-    const limit = rateLimitStore.get(ip);
-    
-    if (now > limit.resetTime) {
-        limit.count = 1;
-        limit.resetTime = now + 10000;
-        return next();
-    }
-    
-    if (limit.count >= 5) {
-        return res.status(429).json({ 
-            success: false, 
-            error: 'Rate limit exceeded. Maximum 5 requests per 10 seconds.' 
-        });
-    }
-    
-    limit.count++;
-    next();
-}
-
-setInterval(() => {
-    const now = Date.now();
-    for (const [ip, limit] of rateLimitStore.entries()) {
-        if (now > limit.resetTime + 60000) {
-            rateLimitStore.delete(ip);
-        }
-    }
-}, 60000);
-
-
-function validatePetFind(findData) {
-    const errors = [];
-    
-    if (!findData.petName || typeof findData.petName !== 'string' || findData.petName.trim().length === 0) {
-        errors.push('Invalid or missing petName');
-    }
-    
-    if (findData.petName && findData.petName.length > 100) {
-        errors.push('petName too long (max 100 characters)');
-    }
-    
-    if (findData.mps !== undefined) {
-        const mps = typeof findData.mps === 'number' ? findData.mps : parseFloat(findData.mps);
-        if (isNaN(mps) || mps < 0 || mps > 1e20) {
-            errors.push('Invalid MPS value');
-        }
-    }
-    
-    if (findData.placeId !== undefined) {
-        const placeId = typeof findData.placeId === 'number' ? findData.placeId : parseInt(findData.placeId);
-        if (isNaN(placeId) || placeId <= 0 || placeId > 1e15) {
-            errors.push('Invalid placeId');
-        }
-    }
-    
-    if (findData.jobId !== undefined && findData.jobId !== null) {
-        const jobIdStr = String(findData.jobId);
-        if (jobIdStr.length > 50) {
-            errors.push('jobId too long');
-        }
-    }
-    
-    if (findData.playerCount !== undefined) {
-        const playerCount = typeof findData.playerCount === 'number' ? findData.playerCount : parseInt(findData.playerCount);
-        if (isNaN(playerCount) || playerCount < 0 || playerCount > 100) {
-            errors.push('Invalid playerCount');
-        }
-    }
-    
-    if (findData.maxPlayers !== undefined) {
-        const maxPlayers = typeof findData.maxPlayers === 'number' ? findData.maxPlayers : parseInt(findData.maxPlayers);
-        if (isNaN(maxPlayers) || maxPlayers < 1 || maxPlayers > 100) {
-            errors.push('Invalid maxPlayers');
-        }
-    }
-    
-    if (findData.accountName && typeof findData.accountName === 'string' && findData.accountName.length > 50) {
-        errors.push('accountName too long');
-    }
-    
-    return errors;
-}
-
-app.post('/api/pet-found', authorize('BOT'), rateLimit, (req, res) => {
-    try {
-        const ip = req.ip || req.connection.remoteAddress || req.headers['x-forwarded-for']?.split(',')[0] || 'unknown';
-        const body = req.body;
-        const finds = body.finds || [body];
-        
-        if (!Array.isArray(finds) || finds.length === 0) {
-            return res.status(400).json({ 
-                success: false, 
-                error: 'Invalid request. Expected "finds" array or single find object.' 
-            });
-        }
-        
-        if (finds.length > 100) {
-            return res.status(400).json({ 
-                success: false, 
-                error: 'Too many finds in batch. Maximum 100 per request.' 
-            });
-        }
-        
-        const accountName = body.accountName || finds[0]?.accountName || "Unknown";
-        
-        let addedCount = 0;
-        let skippedCount = 0;
-        let invalidCount = 0;
-        
-        for (const findData of finds) {
-            const validationErrors = validatePetFind(findData);
-            if (validationErrors.length > 0) {
-                invalidCount++;
-                continue;
-            }
-            
-            const playerCount = findData.playerCount || 0;
-            const maxPlayers = findData.maxPlayers || 6;
-            // Allow full servers; only skip if clearly invalid (negative or absurd)
-            if (playerCount < 0 || playerCount > 50) {
-                skippedCount++;
-                continue;
-            }
-            
-            const mps = typeof findData.mps === 'number' ? findData.mps : (parseFloat(findData.mps) || 0);
-            if (mps < 10000000) {
-                skippedCount++;
-                continue;
-            }
-            
-            const generation = findData.generation ? String(findData.generation) : "N/A";
-            
-            const find = {
-                id: Date.now().toString() + "_" + Math.random().toString(36).substr(2, 9),
-                petName: String(findData.petName).trim(),
-                generation: generation,
-                mps: mps,
-                rarity: findData.rarity ? String(findData.rarity) : "Unknown",
-                placeId: findData.placeId || 0,
-                jobId: findData.jobId ? String(findData.jobId) : "",
-                playerCount: playerCount,
-                maxPlayers: maxPlayers,
-                accountName: findData.accountName ? String(findData.accountName) : accountName,
-                timestamp: findData.timestamp || Date.now(),
-                receivedAt: new Date().toISOString()
-            };
-            
-            petFinds.unshift(find);
-            addedCount++;
-        }
-        
-        cleanupOldFinds();
-        
-        if (petFinds.length > MAX_FINDS) {
-            petFinds = petFinds.slice(0, MAX_FINDS);
-        }
-        
-        if (addedCount > 0) {
-            console.log(`[Pets] ${addedCount} pet(s) sent from ${accountName}`);
-        }
-        
-        res.status(200).json({ 
-            success: true, 
-            message: `Received ${addedCount} pet find(s)`,
-            received: addedCount 
-        });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
-app.get('/api/finds', authorize('ADMIN'), (req, res) => {
-    try {
-        const limit = Math.min(parseInt(req.query.limit) || 50, 500);
-        const finds = petFinds.slice(0, limit);
-        res.json({ success: true, finds: finds, total: petFinds.length });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
-app.get('/api/finds/recent', authorize('GUI'), rateLimit, (req, res) => {
-    try {
-        const now = Date.now();
-        const oneHourAgo = now - (STORAGE_DURATION_HOURS * 60 * 60 * 1000);
-        const tenMinutesAgo = now - (ALWAYS_SHOW_MINUTES * 60 * 1000);
-        const limit = Math.min(parseInt(req.query.limit) || 500, 1000);
-        
-        const hourFinds = petFinds.filter(find => {
-            const findTime = getFindTimestamp(find);
-            return findTime > oneHourAgo;
-        });
-        
-        const last10Minutes = [];
-        const olderButWithinHour = [];
-        
-        for (const find of hourFinds) {
-            const findTime = getFindTimestamp(find);
-            if (findTime > tenMinutesAgo) {
-                last10Minutes.push(find);
-            } else {
-                olderButWithinHour.push(find);
-            }
-        }
-        
-        last10Minutes.sort((a, b) => getFindTimestamp(b) - getFindTimestamp(a));
-        olderButWithinHour.sort((a, b) => getFindTimestamp(b) - getFindTimestamp(a));
-        
-        const combined = [...last10Minutes, ...olderButWithinHour].slice(0, limit);
-        
-        res.json({ 
-            success: true, 
-            finds: combined, 
-            total: combined.length,
-            last10Minutes: last10Minutes.length,
-            lastHour: hourFinds.length
-        });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
-app.delete('/api/finds', authorize('ADMIN'), (req, res) => {
-    petFinds = [];
-    res.json({ success: true, message: 'All finds cleared' });
-});
-
-app.get('/api/health', (req, res) => {
-    res.json({ 
-        success: true, 
-        status: 'running',
-        totalFinds: petFinds.length,
-        uptime: process.uptime()
-    });
-});
-
-app.get('/api/finds/all', authorize('ADMIN'), (req, res) => {
-    try {
-        const limit = Math.min(parseInt(req.query.limit) || 100, 1000);
-        const finds = petFinds.slice(0, limit);
-        res.json({ success: true, finds: finds, total: petFinds.length });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
-
-app.get('/api/job-ids', authorize('BOT'), (req, res) => {
-    try {
-        if (!jobIdFetcher) {
-            return res.json({ 
-                success: true,
-                jobIds: [],
-                count: 0,
-                totalAvailable: 0,
-                cacheInfo: {
-                    count: 0,
-                    lastUpdated: null,
-                    placeId: 0
-                },
-                message: 'Job ID fetcher module not available. Server is running but job ID caching is disabled.'
-            });
-        }
-        
-        const limit = parseInt(req.query.limit) || 1000;
-        const exclude = req.query.exclude ? req.query.exclude.split(',') : [];
-        
+module.exports = {
+    fetchBulkJobIds,
+    loadCache,
+    saveCache,
+    cleanCache,
+    getJobIds: () => {
         try {
-            jobIdFetcher.loadCache();
-        } catch (cacheError) {
-            return res.status(500).json({ 
-                success: false, 
-                error: 'Failed to load job ID cache',
-                details: cacheError.message
+            const ids = jobIdCache.jobIds || [];
+            // Convert to array of job IDs, handling both old format (strings) and new format (objects)
+            return ids.map(item => {
+                if (typeof item === 'string' || typeof item === 'number') return item;
+                if (typeof item === 'object' && item !== null && item.id) return item.id;
+                return item;
             });
+        } catch (error) {
+            console.error('[Cache] Error getting job IDs:', error.message);
+            return [];
         }
-        
-        let jobIds = [];
+    },
+    getFreshestJobIds: (limit = 1000) => {
         try {
-            // Use freshest servers if available, otherwise fall back to regular getJobIds
-            if (typeof jobIdFetcher.getFreshestJobIds === 'function') {
-                jobIds = jobIdFetcher.getFreshestJobIds(limit * 2); // Get more to filter
-            } else {
-                jobIds = jobIdFetcher.getJobIds();
-            }
-            if (!Array.isArray(jobIds)) {
-                jobIds = [];
-            }
-        } catch (getError) {
-            jobIds = [];
-        }
-        
-        if (jobIds.length === 0) {
-            console.log('[Servers] Cache is empty, triggering immediate fetch...');
-            jobIdFetcher.fetchBulkJobIds()
-                .then(result => {
-                    jobIdFetcher.saveCache();
-                    console.log(`[Servers] ✅ Fetched ${result.total} servers in background`);
-                    console.log(`[Servers] Added: ${result.added}, Filtered: ${result.filtered}, Scanned: ${result.scanned}`);
+            const ids = jobIdCache.jobIds || [];
+            // Sort by timestamp (newest first), then take limit
+            const sorted = ids
+                .filter(item => {
+                    if (typeof item === 'string' || typeof item === 'number') return true;
+                    if (typeof item === 'object' && item !== null && item.id) return true;
+                    return false;
                 })
-                .catch(fetchError => {
-                    console.error('[Servers] ❌ Background fetch error:', fetchError.message);
-                    console.error('[Servers] Stack:', fetchError.stack);
-                });
-            
-            return res.json({
-                success: true,
-                jobIds: [],
-                count: 0,
-                totalAvailable: 0,
-                cacheInfo: jobIdFetcher.getCacheInfo(),
-                message: 'Cache is empty, fetching in background. Please retry in a few seconds.'
-            });
+                .sort((a, b) => {
+                    const tsA = typeof a === 'object' ? (a.timestamp || 0) : Date.now();
+                    const tsB = typeof b === 'object' ? (b.timestamp || 0) : Date.now();
+                    return tsB - tsA; // Newest first
+                })
+                .slice(0, limit)
+                .map(item => typeof item === 'object' ? item.id : item);
+            return sorted;
+        } catch (error) {
+            console.error('[Cache] Error getting freshest job IDs:', error.message);
+            return [];
         }
-        
-        const excludeSet = new Set(exclude);
-        jobIds = jobIds.filter(id => !excludeSet.has(id.toString()));
-        
-        if (jobIds.length === 0) {
-            return res.json({
-                success: true,
-                jobIds: [],
-                count: 0,
-                totalAvailable: 0,
-                cacheInfo: jobIdFetcher.getCacheInfo(),
-                message: 'All job IDs were excluded or cache is empty'
-            });
-        }
-        
-        const shuffled = jobIds.sort(() => Math.random() - 0.5);
-        const result = shuffled.slice(0, limit);
-        
-        res.json({
-            success: true,
-            jobIds: result,
-            count: result.length,
-            totalAvailable: jobIds.length,
-            cacheInfo: jobIdFetcher.getCacheInfo(),
-            message: `Returned ${result.length} of ${jobIds.length} available fresh servers`
-        });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
-app.get('/api/job-ids/info', (req, res) => {
-    try {
-        if (!jobIdFetcher) {
-            return res.json({ 
-                success: true,
+    },
+    getCacheInfo: () => {
+        try {
+            return {
+                count: (jobIdCache.jobIds || []).length,
+                lastUpdated: jobIdCache.lastUpdated || null,
+                placeId: jobIdCache.placeId || PLACE_ID
+            };
+        } catch (error) {
+            console.error('[Cache] Error getting cache info:', error.message);
+            return {
                 count: 0,
                 lastUpdated: null,
-                placeId: 0,
-                message: 'Job ID fetcher module not available'
-            });
+                placeId: PLACE_ID
+            };
         }
-        
-        jobIdFetcher.loadCache();
-        const cacheInfo = jobIdFetcher.getCacheInfo();
-        res.json({
-            success: true,
-            ...cacheInfo
-        });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
     }
-});
-
-app.post('/api/job-ids/refresh', authorize('ADMIN'), (req, res) => {
-    try {
-        if (!jobIdFetcher) {
-            return res.json({ 
-                success: false,
-                message: 'Job ID fetcher module not available. Cannot refresh cache.'
-            });
-        }
-        
-        jobIdFetcher.fetchBulkJobIds()
-            .then(result => {
-                jobIdFetcher.saveCache();
-                console.log(`[Servers] Fetched ${result.total} servers`);
-                res.json({
-                    success: true,
-                    message: 'Cache refreshed successfully',
-                    ...result
-                });
-            })
-            .catch(error => {
-                res.status(500).json({ success: false, error: error.message });
-            });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
-app.get('/', (req, res) => {
-    res.json({ 
-        message: 'Pet Finder API Server',
-        endpoints: {
-            'POST /api/pet-found': 'Receive pet finds from bots',
-            'GET /api/finds': 'Get all finds',
-            'GET /api/finds/recent': 'Get recent finds',
-            'DELETE /api/finds': 'Clear all finds',
-            'GET /api/health': 'Health check',
-            'GET /api/job-ids': 'Get cached job IDs for server hopping',
-            'GET /api/job-ids/info': 'Get cache info',
-            'POST /api/job-ids/refresh': 'Manually refresh job ID cache'
-        }
-    });
-});
-
-if (jobIdFetcher) {
-    try {
-        console.log('[Servers] Loading cache...');
-        jobIdFetcher.loadCache();
-        const cacheInfo = jobIdFetcher.getCacheInfo();
-        console.log(`[Servers] Cache loaded: ${cacheInfo.count} servers`);
-        
-        // Always fetch on startup if cache is empty or low
-        if (cacheInfo.count < 1000) {
-            console.log(`[Servers] Cache has ${cacheInfo.count} servers, fetching fresh servers...`);
-            // Use async IIFE to wait for initial fetch
-            (async () => {
-                try {
-                    const result = await jobIdFetcher.fetchBulkJobIds();
-                    jobIdFetcher.saveCache();
-                    console.log(`[Servers] ✅ Fetched ${result.total} servers successfully`);
-                    console.log(`[Servers] Added: ${result.added}, Filtered: ${result.filtered}, Scanned: ${result.scanned}`);
-                } catch (error) {
-                    console.error('[Servers] ❌ Initial fetch error:', error.message);
-                    console.error('[Servers] Stack:', error.stack);
-                    // Retry after 10 seconds
-                    setTimeout(async () => {
-                        try {
-                            console.log('[Servers] Retrying fetch after error...');
-                            const result = await jobIdFetcher.fetchBulkJobIds();
-                            jobIdFetcher.saveCache();
-                            console.log(`[Servers] ✅ Retry successful: ${result.total} servers`);
-                        } catch (retryError) {
-                            console.error('[Servers] ❌ Retry failed:', retryError.message);
-                        }
-                    }, 10000);
-                }
-            })();
-        } else {
-            console.log(`[Servers] Cache has ${cacheInfo.count} servers, skipping initial fetch`);
-        }
-        
-        // Auto-refresh every 5 minutes
-        setInterval(() => {
-            console.log('[Servers] Auto-refreshing cache...');
-            jobIdFetcher.fetchBulkJobIds()
-                .then(result => {
-                    jobIdFetcher.saveCache();
-                    console.log(`[Servers] ✅ Refreshed ${result.total} fresh servers`);
-                    console.log(`[Servers] Added: ${result.added}, Filtered: ${result.filtered}, Scanned: ${result.scanned}`);
-                })
-                .catch(error => {
-                    console.error('[Servers] ❌ Auto-refresh error:', error.message);
-                    console.error('[Servers] Stack:', error.stack);
-                });
-        }, 5 * 60 * 1000);
-    } catch (error) {
-        console.error('[Servers] ❌ Initialization error:', error.message);
-        console.error('[Servers] Stack:', error.stack);
-    }
-} else {
-    console.warn('[Servers] ⚠️ jobIdFetcher module not available');
-}
-
-setInterval(() => {
-    cleanupOldFinds();
-}, 60 * 60 * 1000);
-
-cleanupOldFinds();
-
-app.listen(PORT, '0.0.0.0', () => {
-});
+};
