@@ -241,7 +241,8 @@ app.post('/api/pet-found', authorize('BOT'), rateLimit, (req, res) => {
             
             const playerCount = findData.playerCount || 0;
             const maxPlayers = findData.maxPlayers || 6;
-            if (playerCount >= maxPlayers) {
+            // Allow full servers; only skip if clearly invalid (negative or absurd)
+            if (playerCount < 0 || playerCount > 50) {
                 skippedCount++;
                 continue;
             }
@@ -308,6 +309,7 @@ app.get('/api/finds/recent', authorize('GUI'), rateLimit, (req, res) => {
         const now = Date.now();
         const oneHourAgo = now - (STORAGE_DURATION_HOURS * 60 * 60 * 1000);
         const tenMinutesAgo = now - (ALWAYS_SHOW_MINUTES * 60 * 1000);
+        const limit = Math.min(parseInt(req.query.limit) || 500, 1000);
         
         const hourFinds = petFinds.filter(find => {
             const findTime = getFindTimestamp(find);
@@ -329,7 +331,7 @@ app.get('/api/finds/recent', authorize('GUI'), rateLimit, (req, res) => {
         last10Minutes.sort((a, b) => getFindTimestamp(b) - getFindTimestamp(a));
         olderButWithinHour.sort((a, b) => getFindTimestamp(b) - getFindTimestamp(a));
         
-        const combined = [...last10Minutes, ...olderButWithinHour];
+        const combined = [...last10Minutes, ...olderButWithinHour].slice(0, limit);
         
         res.json({ 
             success: true, 
