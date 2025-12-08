@@ -9,8 +9,14 @@ const jobIdFetcherPath = path.join(__dirname, 'jobIdFetcher.js');
 if (fs.existsSync(jobIdFetcherPath)) {
     try {
         jobIdFetcher = require('./jobIdFetcher');
+        console.log('[Servers] Job ID fetcher module loaded successfully');
     } catch (error) {
+        console.error('[Servers] Failed to load job ID fetcher module:', error.message);
+        console.error('[Servers] Server will continue but job ID caching will be disabled');
     }
+} else {
+    console.warn('[Servers] Job ID fetcher file not found at:', jobIdFetcherPath);
+    console.warn('[Servers] Server will continue but job ID caching will be disabled');
 }
 
 const app = express();
@@ -538,26 +544,8 @@ app.get('/api/finds/all', authorize('ADMIN'), (req, res) => {
 
 app.get('/api/job-ids', authorize('BOT'), (req, res) => {
     try {
-        // Quick health check - respond immediately if server is fetching
-        if (isFetching && jobIdFetcher) {
-            const cacheInfo = jobIdFetcher.getCacheInfo();
-            // If we have some servers cached, return them even during fetch
-            if (cacheInfo && cacheInfo.count > 0) {
-                // Continue to return cached data below
-            } else {
-                // No cache yet, but fetch in progress
-                return res.json({
-                    success: true,
-                    jobIds: [],
-                    servers: [],
-                    count: 0,
-                    totalAvailable: 0,
-                    cacheInfo: cacheInfo,
-                    message: 'Cache is being fetched in background. Please retry in a few seconds.',
-                    isFetching: true
-                });
-            }
-        }
+        // CRITICAL: Respond immediately - never block on fetching
+        // Always return cached data if available, fetch in background if needed
         
         if (!jobIdFetcher) {
             return res.json({ 
@@ -578,49 +566,16 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         const limit = parseInt(req.query.limit) || 1000;
         const exclude = req.query.exclude ? req.query.exclude.split(',') : [];
         
+        // Load cache synchronously (fast operation)
         try {
             jobIdFetcher.loadCache();
         } catch (cacheError) {
-            return res.status(500).json({ 
-                success: false, 
-                error: 'Failed to load job ID cache',
-                details: cacheError.message
-            });
+            console.error('[Servers] Cache load error:', cacheError.message);
+            // Continue anyway - might still have in-memory cache
         }
         
         const cacheInfo = jobIdFetcher.getCacheInfo();
         const hasServers = cacheInfo && cacheInfo.count > 0;
-        
-        if (!hasServers) {
-            // If not already fetching, start a background fetch
-            if (!isFetching) {
-                isFetching = true;
-                console.log('[Servers] Cache is empty, triggering immediate fetch...');
-                jobIdFetcher.fetchBulkJobIds()
-                    .then(result => {
-                        jobIdFetcher.saveCache();
-                        console.log(`[Servers] ✅ Fetched ${result.total} servers in background`);
-                        console.log(`[Servers] Added: ${result.added}, Filtered: ${result.filtered}, Scanned: ${result.scanned}`);
-                        isFetching = false;
-                    })
-                    .catch(fetchError => {
-                        console.error('[Servers] ❌ Background fetch error:', fetchError.message);
-                        console.error('[Servers] Stack:', fetchError.stack);
-                        isFetching = false;
-                    });
-            } else {
-                console.log('[Servers] Fetch already in progress, returning empty response');
-            }
-            
-            return res.json({
-                success: true,
-                jobIds: [],
-                count: 0,
-                totalAvailable: 0,
-                cacheInfo: jobIdFetcher.getCacheInfo(),
-                message: isFetching ? 'Cache is being fetched in background. Please retry in a few seconds.' : 'Cache is empty, fetching in background. Please retry in a few seconds.'
-            });
-        }
         
         // Get servers with full metadata if available (expired servers are automatically filtered)
         let serversWithMetadata = [];
@@ -656,35 +611,75 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         const excludeSet = new Set(exclude);
         serversWithMetadata = serversWithMetadata.filter(server => !excludeSet.has(server.id));
         
-        if (serversWithMetadata.length === 0) {
+        // If we have servers, return them immediately (even if cache is being refreshed)
+        if (serversWithMetadata.length > 0) {
+            const totalAvailable = serversWithMetadata.length;
+            const limited = serversWithMetadata.slice(0, limit);
+            const jobIdsOnly = limited.map(s => s.id);
+            
+            // Trigger background refresh if cache is low or stale, but don't wait for it
+            if (!isFetching && (cacheInfo.count < 100 || (cacheInfo.lastUpdated && (Date.now() - new Date(cacheInfo.lastUpdated).getTime()) > 300000))) {
+                isFetching = true;
+                console.log('[Servers] Cache is low/stale, triggering background refresh...');
+                // Fire and forget - don't block response
+                jobIdFetcher.fetchBulkJobIds()
+                    .then(result => {
+                        jobIdFetcher.saveCache();
+                        console.log(`[Servers] ✅ Background refresh: ${result.total} servers`);
+                        isFetching = false;
+                    })
+                    .catch(fetchError => {
+                        console.error('[Servers] ❌ Background refresh error:', fetchError.message);
+                        isFetching = false;
+                    });
+            }
+            
             return res.json({
                 success: true,
-                jobIds: [],
-                servers: [],
-                count: 0,
-                totalAvailable: 0,
+                jobIds: jobIdsOnly, // Backward compatible: flat array
+                servers: limited, // Enhanced: Full objects with metadata
+                count: limited.length,
+                totalAvailable: totalAvailable,
                 cacheInfo: cacheInfo,
-                message: 'All job IDs were excluded or cache is empty'
+                hasMetadata: limited.length > 0 && (limited[0].players !== undefined || limited[0].timestamp !== undefined)
             });
         }
         
-        const totalAvailable = serversWithMetadata.length;
-        const limited = serversWithMetadata.slice(0, limit);
+        // No servers available - trigger background fetch if not already fetching
+        if (!hasServers && !isFetching) {
+            isFetching = true;
+            console.log('[Servers] Cache is empty, triggering immediate background fetch...');
+            // Fire and forget - respond immediately
+            jobIdFetcher.fetchBulkJobIds()
+                .then(result => {
+                    jobIdFetcher.saveCache();
+                    console.log(`[Servers] ✅ Fetched ${result.total} servers in background`);
+                    isFetching = false;
+                })
+                .catch(fetchError => {
+                    console.error('[Servers] ❌ Background fetch error:', fetchError.message);
+                    isFetching = false;
+                });
+        }
         
-        // Extract job IDs for backward compatibility
-        const jobIdsOnly = limited.map(s => s.id);
-        
-        res.json({
+        // Return empty response immediately (don't wait for fetch)
+        return res.json({
             success: true,
-            jobIds: jobIdsOnly, // Backward compatible: flat array
-            servers: limited, // Enhanced: Full objects with metadata (players, maxPlayers, timestamp)
-            count: limited.length,
-            totalAvailable: totalAvailable,
+            jobIds: [],
+            servers: [],
+            count: 0,
+            totalAvailable: 0,
             cacheInfo: cacheInfo,
-            hasMetadata: limited.length > 0 && (limited[0].players !== undefined || limited[0].timestamp !== undefined) // Check if metadata exists
+            message: isFetching ? 'Cache is being fetched in background. Please retry in a few seconds.' : 'Cache is empty, fetching in background. Please retry in a few seconds.',
+            isFetching: isFetching
         });
     } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
+        console.error('[Servers] Error in /api/job-ids:', error);
+        res.status(500).json({ 
+            success: false, 
+            error: error.message,
+            message: 'Internal server error while fetching job IDs'
+        });
     }
 });
 
@@ -838,4 +833,11 @@ setInterval(() => {
 cleanupOldFinds();
 
 app.listen(PORT, '0.0.0.0', () => {
+    console.log(`[Server] Pet Finder API Server running on port ${PORT}`);
+    console.log(`[Server] Health check: http://localhost:${PORT}/health`);
+    if (jobIdFetcher) {
+        console.log(`[Server] Job ID caching: ENABLED`);
+    } else {
+        console.log(`[Server] Job ID caching: DISABLED (module not available)`);
+    }
 });
