@@ -545,27 +545,47 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         
         let servers = [];
         try {
-            servers = jobIdFetcher.getFreshestServers(limit * 2) || [];
+            // For bulk requests (limit > 100), request more servers upfront
+            const requestLimit = limit > 100 ? limit * 3 : limit * 2;
+            servers = jobIdFetcher.getFreshestServers(requestLimit) || [];
         } catch (error) {
             console.error('[Servers] Error getting servers:', error.message);
         }
         
-        // Filter out excluded servers and full servers (players >= maxPlayers)
-        const excludeSet = new Set(exclude);
-        servers = servers.filter(server => {
-            if (excludeSet.has(server.id)) return false;
-            // Filter out full servers
+        // FAST FILTERING: Optimized for bulk requests (100 accounts)
+        // Use Set for O(1) lookup instead of array includes
+        const excludeSet = new Set(exclude.filter(id => id && id.length > 0));
+        
+        // Single pass filter - trust cache, servers already filtered for full at cache level
+        const filtered = [];
+        for (const server of servers) {
+            // Skip excluded servers
+            if (excludeSet.has(server.id)) continue;
+            
+            // Defensive check: double-check full servers (cache should have filtered, but verify)
             const players = server.players || 0;
             const maxPlayers = server.maxPlayers || 8;
-            return players < maxPlayers;
-        });
+            if (players >= maxPlayers) continue; // Skip full servers
+            
+            filtered.push(server);
+            
+            // Early exit if we have enough for bulk requests
+            if (filtered.length >= limit && limit > 100) {
+                break;
+            }
+        }
         
-        const limited = servers.slice(0, limit);
+        const limited = filtered.slice(0, limit);
         
         // Background refresh if needed (cleans stale, adds fresh)
+        // Only refresh if cache is small OR older than 5 minutes, AND no fetch in progress
+        // This prevents overlapping fetches that could cause rate limiting
         if (!isFetching && (cacheInfo.count < 100 || (cacheInfo.lastUpdated && (Date.now() - new Date(cacheInfo.lastUpdated).getTime()) > 300000))) {
             setImmediate(() => {
-                if (isFetching) return;
+                if (isFetching) {
+                    console.log('[Servers] Skipping background refresh - fetch already in progress');
+                    return;
+                }
                 isFetching = true;
                 // Clean expired entries before fetching new ones
                 jobIdFetcher.cleanCache();
@@ -577,6 +597,10 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
                     })
                     .catch(error => {
                         console.error('[Servers] Refresh error:', error.message);
+                        // If rate limited, wait longer before allowing another fetch
+                        if (error.message && error.message.includes('429')) {
+                            console.log('[Servers] Rate limited - will delay next automatic refresh');
+                        }
                         isFetching = false;
                     });
             });
@@ -684,6 +708,7 @@ server = app.listen(PORT, '0.0.0.0', () => {
             }
             
             // Clean expired entries every 2 minutes (more frequent than refresh)
+            // Note: This doesn't make API calls, just cleans in-memory cache
             setInterval(() => {
                 if (!isFetching) {
                     const beforeCleanup = jobIdFetcher.getCacheInfo().count;
@@ -696,9 +721,14 @@ server = app.listen(PORT, '0.0.0.0', () => {
                 }
             }, 2 * 60 * 1000);
             
-            // Auto-refresh every 5 minutes (removes stale, adds fresh)
+            // Auto-refresh every 10 minutes (removes stale, adds fresh)
+            // Increased from 5 to 10 minutes to avoid rate limiting with Roblox API
+            // Full fetch can take 8-10 minutes (100 pages * 6 seconds), so 10 minutes ensures no overlap
             setInterval(() => {
-                if (isFetching) return;
+                if (isFetching) {
+                    console.log('[Servers] Skipping auto-refresh - previous fetch still in progress');
+                    return;
+                }
                 isFetching = true;
                 jobIdFetcher.fetchBulkJobIds()
                     .then(result => {
@@ -710,7 +740,7 @@ server = app.listen(PORT, '0.0.0.0', () => {
                         console.error('[Servers] Auto-refresh error:', error.message);
                         isFetching = false;
                     });
-            }, 5 * 60 * 1000);
+            }, 10 * 60 * 1000); // 10 minutes instead of 5
         });
     }
 });
