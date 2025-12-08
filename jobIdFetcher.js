@@ -6,7 +6,7 @@ const PLACE_ID = parseInt(process.env.PLACE_ID, 10) || 109983668079237;
 const CACHE_FILE = path.join(__dirname, 'jobIds_cache.json');
 const MAX_JOB_IDS = parseInt(process.env.MAX_JOB_IDS || '1000', 10);
 const PAGES_TO_FETCH = parseInt(process.env.PAGES_TO_FETCH || '100', 10); // Fetch many pages to find servers with 7/8 or less
-const DELAY_BETWEEN_REQUESTS = parseInt(process.env.DELAY_BETWEEN_REQUESTS || '5000', 10); // Increased to 5 seconds to avoid rate limits
+const DELAY_BETWEEN_REQUESTS = parseInt(process.env.DELAY_BETWEEN_REQUESTS || '6000', 10); // 6 seconds between requests to avoid Roblox rate limits (conservative)
 const MIN_PLAYERS = parseInt(process.env.MIN_PLAYERS || '1', 10);
 const MAX_PLAYERS = parseInt(process.env.MAX_PLAYERS || '6', 10); // Exclude full servers (7+ players, max is usually 6)
 const JOB_ID_MAX_AGE_MS = parseInt(process.env.JOB_ID_MAX_AGE_MS || '600000', 10); // 10 minutes - Roblox servers expire after inactivity
@@ -193,6 +193,8 @@ async function fetchPage(cursor = null, retryCount = 0) {
 async function fetchBulkJobIds() {
     console.log(`[Fetch] Starting bulk fetch for place ID: ${PLACE_ID}`);
     console.log(`[Fetch] Target: ${MAX_JOB_IDS} FRESHEST job IDs, fetching up to ${PAGES_TO_FETCH} pages`);
+    console.log(`[Fetch] Delay between requests: ${DELAY_BETWEEN_REQUESTS}ms (to avoid rate limiting)`);
+    console.log(`[Fetch] Estimated max time: ${Math.ceil((PAGES_TO_FETCH * DELAY_BETWEEN_REQUESTS) / 60000)} minutes`);
     console.log(`[Fetch] Sort Order: Desc (newest servers first)`);
     console.log(`[Fetch] Using excludeFullGames=true parameter to exclude full servers at API level`);
     console.log(`[Fetch] Filtering: Only caching servers with 7/8 or less players (players < maxPlayers)`);
@@ -251,10 +253,11 @@ async function fetchBulkJobIds() {
         await new Promise(resolve => setImmediate(resolve));
         
         if (pagesFetched > 0) {
+            // Respect rate limits - wait between requests to avoid 429 errors
             await new Promise(resolve => setTimeout(resolve, DELAY_BETWEEN_REQUESTS));
         }
         
-        console.log(`[Fetch] Fetching page ${pagesFetched + 1}...`);
+        console.log(`[Fetch] Fetching page ${pagesFetched + 1}/${PAGES_TO_FETCH}...`);
         let data;
         try {
             data = await fetchPage(cursor, 0);
