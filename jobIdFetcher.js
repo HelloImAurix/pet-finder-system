@@ -274,8 +274,9 @@ async function fetchBulkJobIds() {
             }
             
             // Exclude full servers: Only allow servers with players < maxPlayers (7/8 or less)
-            // This means: 7/8 = allowed, 8/8 = filtered out
-            if (players >= maxPlayers) {
+            // Also exclude servers very close to full (6/8 or less) to prevent race conditions
+            // This means: 6/8 or less = allowed, 7/8 or 8/8 = filtered out
+            if (players >= (maxPlayers - 1)) {
                 filterStats.full++;
                 pageFiltered++;
                 continue;
@@ -529,8 +530,9 @@ module.exports = {
                         }
                         
                         // Filter out full servers (players >= maxPlayers)
-                        if (players >= maxPlayers) {
-                            return false; // Full server
+                        // Also filter out servers very close to full (within 1 slot)
+                        if (players >= maxPlayers || players >= (maxPlayers - 1)) {
+                            return false; // Full or too close to full
                         }
                         
                         return true; // Valid and not full
