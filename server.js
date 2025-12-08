@@ -16,9 +16,9 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 const API_KEYS = {
-    BOT: process.env.BOT_API_KEY || 'bot_key_change_me',
-    GUI: process.env.GUI_API_KEY || 'gui_key_change_me',
-    ADMIN: process.env.ADMIN_API_KEY || 'admin_key_change_me'
+    BOT: process.env.BOT_API_KEY || 'sablujihub-bot',
+    GUI: process.env.GUI_API_KEY || 'sablujihub-gui',
+    ADMIN: process.env.ADMIN_API_KEY || 'sablujihub-admin'
 };
 
 const requestLogs = new Map();
@@ -38,7 +38,9 @@ function logRequest(ip, endpoint, method) {
 
 function authorize(requiredKey) {
     return (req, res, next) => {
-        const apiKey = req.headers['x-api-key'] || req.headers['authorization']?.replace('Bearer ', '');
+        const apiKey = req.headers['x-api-key'] 
+            || req.headers['authorization']?.replace('Bearer ', '') 
+            || req.query.key;
         
         const ip = req.ip || req.connection.remoteAddress || req.headers['x-forwarded-for']?.split(',')[0] || 'unknown';
         
