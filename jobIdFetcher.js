@@ -87,7 +87,7 @@ function saveCache() {
 
 function makeRequest(url) {
     return new Promise((resolve, reject) => {
-        https.get(url, (res) => {
+        const request = https.get(url, (res) => {
             let data = '';
             
             res.on('data', (chunk) => {
@@ -102,11 +102,19 @@ function makeRequest(url) {
                         reject(new Error(`Failed to parse JSON: ${error.message}`));
                     }
                 } else {
-                    reject(new Error(`HTTP ${res.statusCode}: ${data}`));
+                    reject(new Error(`HTTP ${res.statusCode}: ${data.substring(0, 200)}`));
                 }
             });
-        }).on('error', (error) => {
-            reject(error);
+        });
+        
+        // Add timeout (30 seconds)
+        request.setTimeout(30000, () => {
+            request.destroy();
+            reject(new Error('Request timeout after 30 seconds'));
+        });
+        
+        request.on('error', (error) => {
+            reject(new Error(`Request failed: ${error.message}`));
         });
     });
 }
@@ -148,7 +156,15 @@ async function fetchBulkJobIds() {
         }
         
         console.log(`[Fetch] Fetching page ${pagesFetched + 1}...`);
-        const data = await fetchPage(cursor);
+        let data;
+        try {
+            data = await fetchPage(cursor);
+        } catch (error) {
+            console.error(`[Fetch] Error on page ${pagesFetched + 1}:`, error.message);
+            // Continue to next page instead of breaking
+            pagesFetched++;
+            continue;
+        }
         
         if (!data || !data.data || data.data.length === 0) {
             console.log(`[Fetch] No more data available`);
