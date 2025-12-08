@@ -200,7 +200,8 @@ async function fetchBulkJobIds() {
             const maxPlayers = server.maxPlayers || 6;
             
             // Debug: Store sample of first few servers from first page
-            if (pagesFetched === 1 && totalScanned <= 5) {
+            // Note: pagesFetched is 0 for first page, 1 for second page, etc.
+            if (pagesFetched === 0 && totalScanned <= 5) {
                 sampleServers.push({ 
                     jobId, 
                     players, 
@@ -244,7 +245,11 @@ async function fetchBulkJobIds() {
                 continue;
             }
             // Exclude full servers: players >= maxPlayers means server is full
+            // Debug: Log first few full servers to see what's happening
             if (players >= maxPlayers) {
+                if (pagesFetched === 0 && totalScanned <= 3 && filterStats.full < 3) {
+                    console.log(`[Fetch] DEBUG - Full server example: JobId: ${jobId?.toString().substring(0, 12)}..., Players: ${players}, MaxPlayers: ${maxPlayers}, IsFull: ${players >= maxPlayers}`);
+                }
                 filterStats.full++;
                 pageFiltered++;
                 continue;
@@ -293,7 +298,7 @@ async function fetchBulkJobIds() {
         const filterSummary = filterDetails.length > 0 ? filterDetails.join(', ') : 'none';
         console.log(`[Fetch] Page ${pagesFetched}: Added ${pageAdded} new job IDs, Filtered ${pageFiltered} (${filterSummary}) (Total: ${jobIdCache.jobIds.length}/${MAX_JOB_IDS}, Scanned: ${totalScanned})`);
         
-        // Debug: Log sample servers from first page
+        // Debug: Log sample servers from first page (check before increment, so use pagesFetched === 1)
         if (pagesFetched === 1 && sampleServers.length > 0) {
             console.log(`[Fetch] DEBUG - Sample servers (first ${sampleServers.length}):`);
             sampleServers.forEach((s, i) => {
