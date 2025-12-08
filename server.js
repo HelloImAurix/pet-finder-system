@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 
 let jobIdFetcher = null;
+let isFetching = false; // Track if a fetch is in progress
 const jobIdFetcherPath = path.join(__dirname, 'jobIdFetcher.js');
 if (fs.existsSync(jobIdFetcherPath)) {
     try {
@@ -14,6 +15,21 @@ if (fs.existsSync(jobIdFetcherPath)) {
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Add request timeout middleware to prevent Railway timeouts
+app.use((req, res, next) => {
+    // Set a timeout for all requests (25 seconds - Railway has 30s timeout)
+    req.setTimeout(25000, () => {
+        if (!res.headersSent) {
+            res.status(504).json({
+                success: false,
+                error: 'Request timeout',
+                message: 'The request took too long to process'
+            });
+        }
+    });
+    next();
+});
 
 const API_KEYS = {
     BOT: process.env.BOT_API_KEY || 'sablujihub-bot',
@@ -416,17 +432,25 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         }
         
         if (jobIds.length === 0) {
-            console.log('[Servers] Cache is empty, triggering immediate fetch...');
-            jobIdFetcher.fetchBulkJobIds()
-                .then(result => {
-                    jobIdFetcher.saveCache();
-                    console.log(`[Servers] ✅ Fetched ${result.total} servers in background`);
-                    console.log(`[Servers] Added: ${result.added}, Filtered: ${result.filtered}, Scanned: ${result.scanned}`);
-                })
-                .catch(fetchError => {
-                    console.error('[Servers] ❌ Background fetch error:', fetchError.message);
-                    console.error('[Servers] Stack:', fetchError.stack);
-                });
+            // If not already fetching, start a background fetch
+            if (!isFetching) {
+                isFetching = true;
+                console.log('[Servers] Cache is empty, triggering immediate fetch...');
+                jobIdFetcher.fetchBulkJobIds()
+                    .then(result => {
+                        jobIdFetcher.saveCache();
+                        console.log(`[Servers] ✅ Fetched ${result.total} servers in background`);
+                        console.log(`[Servers] Added: ${result.added}, Filtered: ${result.filtered}, Scanned: ${result.scanned}`);
+                        isFetching = false;
+                    })
+                    .catch(fetchError => {
+                        console.error('[Servers] ❌ Background fetch error:', fetchError.message);
+                        console.error('[Servers] Stack:', fetchError.stack);
+                        isFetching = false;
+                    });
+            } else {
+                console.log('[Servers] Fetch already in progress, returning empty response');
+            }
             
             return res.json({
                 success: true,
@@ -434,7 +458,7 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
                 count: 0,
                 totalAvailable: 0,
                 cacheInfo: jobIdFetcher.getCacheInfo(),
-                message: 'Cache is empty, fetching in background. Please retry in a few seconds.'
+                message: isFetching ? 'Cache is being fetched in background. Please retry in a few seconds.' : 'Cache is empty, fetching in background. Please retry in a few seconds.'
             });
         }
         
@@ -544,25 +568,36 @@ if (jobIdFetcher) {
         // Always fetch on startup if cache is empty or low
         if (cacheInfo.count < 1000) {
             console.log(`[Servers] Cache has ${cacheInfo.count} servers, fetching fresh servers...`);
-            // Use async IIFE to wait for initial fetch
+            // Use async IIFE to wait for initial fetch (but don't block server startup)
             (async () => {
+                if (isFetching) {
+                    console.log('[Servers] Fetch already in progress, skipping startup fetch');
+                    return;
+                }
+                isFetching = true;
                 try {
                     const result = await jobIdFetcher.fetchBulkJobIds();
                     jobIdFetcher.saveCache();
                     console.log(`[Servers] ✅ Fetched ${result.total} servers successfully`);
                     console.log(`[Servers] Added: ${result.added}, Filtered: ${result.filtered}, Scanned: ${result.scanned}`);
+                    isFetching = false;
                 } catch (error) {
                     console.error('[Servers] ❌ Initial fetch error:', error.message);
                     console.error('[Servers] Stack:', error.stack);
+                    isFetching = false;
                     // Retry after 10 seconds
                     setTimeout(async () => {
+                        if (isFetching) return;
+                        isFetching = true;
                         try {
                             console.log('[Servers] Retrying fetch after error...');
                             const result = await jobIdFetcher.fetchBulkJobIds();
                             jobIdFetcher.saveCache();
                             console.log(`[Servers] ✅ Retry successful: ${result.total} servers`);
+                            isFetching = false;
                         } catch (retryError) {
                             console.error('[Servers] ❌ Retry failed:', retryError.message);
+                            isFetching = false;
                         }
                     }, 10000);
                 }
@@ -573,16 +608,23 @@ if (jobIdFetcher) {
         
         // Auto-refresh every 5 minutes
         setInterval(() => {
+            if (isFetching) {
+                console.log('[Servers] Skipping auto-refresh - fetch already in progress');
+                return;
+            }
+            isFetching = true;
             console.log('[Servers] Auto-refreshing cache...');
             jobIdFetcher.fetchBulkJobIds()
                 .then(result => {
                     jobIdFetcher.saveCache();
                     console.log(`[Servers] ✅ Refreshed ${result.total} fresh servers`);
                     console.log(`[Servers] Added: ${result.added}, Filtered: ${result.filtered}, Scanned: ${result.scanned}`);
+                    isFetching = false;
                 })
                 .catch(error => {
                     console.error('[Servers] ❌ Auto-refresh error:', error.message);
                     console.error('[Servers] Stack:', error.stack);
+                    isFetching = false;
                 });
         }, 5 * 60 * 1000);
     } catch (error) {
