@@ -162,14 +162,22 @@ async function fetchBulkJobIds() {
             const jobId = server.id;
             const players = server.playing || 0;
             const maxPlayers = server.maxPlayers || 6;
+            // Filter VIP servers
             const isVipServer = server.vipServerId !== null && server.vipServerId !== undefined;
-            const isPrivateServer = server.accessCode !== null && server.accessCode !== undefined;
+            
+            // Filter private servers - check multiple indicators to catch all types:
+            // - accessCode: Private servers that require an access code to join
+            // - PrivateServerId: Private server identifier (capitalized property)
+            // - privateServerId: Private server identifier (camelCase property)
+            const isPrivateServer = (server.accessCode !== null && server.accessCode !== undefined) ||
+                                   (server.PrivateServerId !== null && server.PrivateServerId !== undefined) ||
+                                   (server.privateServerId !== null && server.privateServerId !== undefined);
             
             // Filter criteria:
             // 1. Must have at least MIN_PLAYERS
             // 2. Must have less than MAX_PLAYERS (not full)
             // 3. Must not be a VIP server
-            // 4. Must not be a private server (with access code)
+            // 4. Must not be a private server (with access code or PrivateServerId)
             // 5. Must not already be in cache
             if (players >= MIN_PLAYERS && 
                 players <= MAX_PLAYERS && 
