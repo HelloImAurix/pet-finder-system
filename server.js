@@ -80,8 +80,12 @@ const API_KEYS = {
 
 // Server status check cache - stores recent checks to avoid too many API calls
 const serverStatusCache = new Map();
-const SERVER_CHECK_CACHE_MS = 60 * 1000; // Cache check results for 1 minute
+const SERVER_CHECK_CACHE_MS = 30 * 1000; // Cache check results for 30 seconds (reduced for freshness)
 const PLACE_ID = parseInt(process.env.PLACE_ID, 10) || 109983668079237;
+
+// Blacklist for used servers - prevents sending same servers
+const serverBlacklist = new Map(); // Map of jobId -> timestamp
+const BLACKLIST_DURATION_MS = 5 * 60 * 1000; // Blacklist for 5 minutes
 
 // Function to make HTTP request (similar to jobIdFetcher)
 function makeHttpRequest(url) {
@@ -185,10 +189,7 @@ async function checkServerStatus(jobId, placeId = PLACE_ID) {
             
             pagesChecked++;
             
-            // Small delay between pages to avoid rate limits
-            if (pagesChecked < maxPages) {
-                await new Promise(resolve => setTimeout(resolve, 500));
-            }
+            // No delay for speed - rely on rate limit handling
         }
         
         // Server not found in API response - might be full or closed
@@ -210,47 +211,90 @@ async function checkServerStatus(jobId, placeId = PLACE_ID) {
     }
 }
 
-// Batch check multiple servers (with rate limiting)
-async function checkServerStatusBatch(servers, maxChecks = 10) {
+// Batch check multiple servers (optimized for speed with parallel checks)
+async function checkServerStatusBatch(servers, maxChecks = 15) {
     const toCheck = [];
     const now = Date.now();
     
-    // Filter servers that should be checked
+    // Filter servers that should be checked - prioritize top servers
     for (const server of servers) {
         if (toCheck.length >= maxChecks) break;
         
-        // Only check servers that might be full (close to capacity or stale metadata)
-        const players = server.players || 0;
-        const maxPlayers = server.maxPlayers || 8;
-        const metadataAge = now - (server.timestamp || 0);
-        
-        // Prioritize checking:
-        // 1. Servers near capacity (within 1 slot of full)
-        // 2. Servers with stale metadata (>2 minutes old)
-        const shouldCheck = (players >= (maxPlayers - 1)) || (metadataAge > 2 * 60 * 1000);
-        
-        if (shouldCheck) {
-            toCheck.push(server);
+        // Skip blacklisted servers
+        if (serverBlacklist.has(server.id)) {
+            const blacklistTime = serverBlacklist.get(server.id);
+            if (now - blacklistTime < BLACKLIST_DURATION_MS) {
+                continue; // Still blacklisted
+            } else {
+                serverBlacklist.delete(server.id); // Expired, remove from blacklist
+            }
         }
+        
+        // Check all top servers for freshness and availability
+        toCheck.push(server);
     }
     
-    // Check servers sequentially with delays to avoid rate limits
+    // Check servers in parallel batches for speed (3 at a time)
     const results = [];
-    for (const server of toCheck) {
-        try {
-            const status = await checkServerStatus(server.id, PLACE_ID);
-            results.push({ server, status });
-        } catch (error) {
-            results.push({ server, status: null, error: error.message });
-        }
+    const batchSize = 3;
+    
+    for (let i = 0; i < toCheck.length; i += batchSize) {
+        const batch = toCheck.slice(i, i + batchSize);
+        const batchPromises = batch.map(server =>
+            checkServerStatus(server.id, PLACE_ID)
+                .then(status => ({ server, status }))
+                .catch(error => ({ server, status: null, error: error.message }))
+        );
         
-        // Small delay between checks to avoid rate limits
-        if (toCheck.indexOf(server) < toCheck.length - 1) {
-            await new Promise(resolve => setTimeout(resolve, 300));
+        const batchResults = await Promise.all(batchPromises);
+        results.push(...batchResults);
+        
+        // Minimal delay between batches
+        if (i + batchSize < toCheck.length) {
+            await new Promise(resolve => setTimeout(resolve, 200));
         }
     }
     
     return results;
+}
+
+// Mark server as used (blacklist it)
+function blacklistServer(jobId) {
+    if (!jobId) return;
+    const jobIdStr = String(jobId);
+    serverBlacklist.set(jobIdStr, Date.now());
+    
+    // Clean up expired blacklist entries periodically
+    const now = Date.now();
+    for (const [id, timestamp] of serverBlacklist.entries()) {
+        if (now - timestamp > BLACKLIST_DURATION_MS * 2) {
+            serverBlacklist.delete(id);
+        }
+    }
+}
+
+// Remove server from cache
+function removeServerFromCache(jobId) {
+    if (!jobIdFetcher || !jobId) return;
+    
+    try {
+        jobIdFetcher.loadCache();
+        const jobIdStr = String(jobId);
+        
+        // Remove from cache if possible
+        if (jobIdFetcher.removeJobId) {
+            jobIdFetcher.removeJobId(jobIdStr);
+        }
+        
+        // Blacklist it so it won't be returned in future requests
+        blacklistServer(jobIdStr);
+        
+        console.log(`[Cache] Removed/blacklisted server: ${jobIdStr}`);
+    } catch (error) {
+        console.warn(`[Cache] Failed to remove server ${jobId}:`, error.message);
+        // Still blacklist even if cache removal fails
+        blacklistServer(String(jobId));
+    }
 }
 
 function authorize(requiredKey) {
@@ -793,14 +837,13 @@ app.get('/api/job-ids', authorize('BOT'), async (req, res) => {
             return (a.players || 0) - (b.players || 0);
         });
         
-        // Real-time server status check for top servers (prioritize checking servers we'll actually send)
-        // Only check a limited number to avoid rate limits and keep response time reasonable
-        const serversToCheck = servers.slice(0, Math.min(limit, 10)); // Check top 10 servers max
+        // Real-time server status check for top servers (optimized for speed)
+        const serversToCheck = servers.slice(0, Math.min(limit, 15)); // Check top 15 servers
         
         try {
-            // Add timeout to prevent slow responses (max 5 seconds for checks)
-            const checkPromise = checkServerStatusBatch(serversToCheck, 10);
-            const timeoutPromise = new Promise((resolve) => setTimeout(() => resolve([]), 5000));
+            // Fast parallel checks with timeout
+            const checkPromise = checkServerStatusBatch(serversToCheck, 15);
+            const timeoutPromise = new Promise((resolve) => setTimeout(() => resolve([]), 3000)); // 3s timeout
             const checkResults = await Promise.race([checkPromise, timeoutPromise]);
             
             if (Array.isArray(checkResults) && checkResults.length > 0) {
@@ -812,8 +855,18 @@ app.get('/api/job-ids', authorize('BOT'), async (req, res) => {
                     }
                 }
                 
-                // Filter out servers that are full based on real-time check
+                // Filter out blacklisted, full, or unavailable servers
                 servers = servers.filter(server => {
+                    // Check blacklist first
+                    if (serverBlacklist.has(server.id)) {
+                        const blacklistTime = serverBlacklist.get(server.id);
+                        if (Date.now() - blacklistTime < BLACKLIST_DURATION_MS) {
+                            return false; // Still blacklisted
+                        } else {
+                            serverBlacklist.delete(server.id); // Expired, remove
+                        }
+                    }
+                    
                     const realTimeStatus = checkedServers.get(server.id);
                     
                     if (realTimeStatus) {
@@ -853,6 +906,20 @@ app.get('/api/job-ids', authorize('BOT'), async (req, res) => {
             console.warn('[Servers] Error during real-time server checks:', error.message);
             // Continue with cached data if real-time check fails
         }
+        
+        // Final filter: remove blacklisted servers (use existing now variable)
+        servers = servers.filter(server => {
+            if (serverBlacklist.has(server.id)) {
+                const blacklistTime = serverBlacklist.get(server.id);
+                if (now - blacklistTime < BLACKLIST_DURATION_MS) {
+                    return false; // Still blacklisted
+                } else {
+                    serverBlacklist.delete(server.id); // Expired, remove
+                    return true;
+                }
+            }
+            return true;
+        });
         
         const limited = servers.slice(0, limit);
         
@@ -905,6 +972,31 @@ app.get('/api/job-ids/info', (req, res) => {
         res.json({
             success: true,
             ...cacheInfo
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// Endpoint to mark server as used (blacklist it)
+app.post('/api/job-ids/used', authorize('BOT'), (req, res) => {
+    try {
+        const { jobId } = req.body;
+        
+        if (!jobId) {
+            return res.status(400).json({ success: false, error: 'jobId is required' });
+        }
+        
+        // Blacklist the server
+        blacklistServer(jobId);
+        
+        // Remove from cache
+        removeServerFromCache(jobId);
+        
+        res.json({
+            success: true,
+            message: `Server ${jobId} blacklisted`,
+            blacklistedCount: serverBlacklist.size
         });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
