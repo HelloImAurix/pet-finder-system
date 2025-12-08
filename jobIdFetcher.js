@@ -298,7 +298,8 @@ async function fetchBulkJobIds() {
         const filterSummary = filterDetails.length > 0 ? filterDetails.join(', ') : 'none';
         console.log(`[Fetch] Page ${pagesFetched}: Added ${pageAdded} new job IDs, Filtered ${pageFiltered} (${filterSummary}) (Total: ${jobIdCache.jobIds.length}/${MAX_JOB_IDS}, Scanned: ${totalScanned})`);
         
-        // Debug: Log sample servers from first page (check before increment, so use pagesFetched === 1)
+        // Debug: Log sample servers from first page
+        // pagesFetched is incremented above, so after first page it will be 1
         if (pagesFetched === 1 && sampleServers.length > 0) {
             console.log(`[Fetch] DEBUG - Sample servers (first ${sampleServers.length}):`);
             sampleServers.forEach((s, i) => {
