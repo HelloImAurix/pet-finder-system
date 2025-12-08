@@ -150,7 +150,7 @@ async function fetchBulkJobIds() {
     console.log(`[Fetch] Starting bulk fetch for place ID: ${PLACE_ID}`);
     console.log(`[Fetch] Target: ${MAX_JOB_IDS} FRESHEST job IDs, fetching up to ${PAGES_TO_FETCH} pages`);
     console.log(`[Fetch] Sort Order: Desc (newest servers first)`);
-    console.log(`[Fetch] Filtering: Only servers with ${MIN_PLAYERS}-${MAX_PLAYERS} players (excluding full servers)`);
+    console.log(`[Fetch] Filtering: Only servers with ${MIN_PLAYERS}+ players and not full (players < maxPlayers)`);
     console.log(`[Fetch] Filtering: Excluding VIP servers and private servers`);
     console.log(`[Fetch] This will refresh the entire cache with the freshest servers`);
     
@@ -230,7 +230,8 @@ async function fetchBulkJobIds() {
                 pageFiltered++;
                 continue;
             }
-            if (players > MAX_PLAYERS) {
+            // Exclude full servers: players >= maxPlayers means server is full
+            if (players >= maxPlayers) {
                 filterStats.full++;
                 pageFiltered++;
                 continue;
@@ -247,9 +248,10 @@ async function fetchBulkJobIds() {
             }
             
             // Server passed all filters
+            // Note: We check players < maxPlayers (not <= MAX_PLAYERS) to exclude full servers
             if (jobId && 
                 players >= MIN_PLAYERS && 
-                players <= MAX_PLAYERS && 
+                players < maxPlayers &&  // Exclude full servers (players < maxPlayers)
                 !isVipServer && 
                 !isPrivateServer && 
                 !existingJobIds.has(jobId) && 
