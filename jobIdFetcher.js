@@ -6,9 +6,9 @@ const PLACE_ID = parseInt(process.env.PLACE_ID, 10) || 109983668079237;
 const CACHE_FILE = path.join(__dirname, 'jobIds_cache.json');
 const MAX_JOB_IDS = parseInt(process.env.MAX_JOB_IDS || '1000', 10);
 const PAGES_TO_FETCH = parseInt(process.env.PAGES_TO_FETCH || '15', 10);
-const DELAY_BETWEEN_REQUESTS = parseInt(process.env.DELAY_BETWEEN_REQUESTS || '2000', 10);
+const DELAY_BETWEEN_REQUESTS = parseInt(process.env.DELAY_BETWEEN_REQUESTS || '5000', 10); // Increased to 5 seconds to avoid rate limits
 const MIN_PLAYERS = parseInt(process.env.MIN_PLAYERS || '1', 10);
-const MAX_PLAYERS = parseInt(process.env.MAX_PLAYERS || '5', 10); // Exclude full servers (6+ players)
+const MAX_PLAYERS = parseInt(process.env.MAX_PLAYERS || '6', 10); // Exclude full servers (7+ players, max is usually 6)
 let jobIdCache = {
     jobIds: [],
     lastUpdated: null,
@@ -119,7 +119,7 @@ function makeRequest(url) {
     });
 }
 
-async function fetchPage(cursor = null) {
+async function fetchPage(cursor = null, retryCount = 0) {
     let url = `https://games.roblox.com/v1/games/${PLACE_ID}/servers/Public?sortOrder=Desc&limit=100`;
     if (cursor) {
         url += `&cursor=${cursor}`;
@@ -129,6 +129,18 @@ async function fetchPage(cursor = null) {
         const data = await makeRequest(url);
         return data;
     } catch (error) {
+        // Handle rate limiting (429) with exponential backoff
+        if (error.message.includes('429') || error.message.includes('Too many requests')) {
+            if (retryCount < 3) {
+                const backoffDelay = Math.min(10000 * Math.pow(2, retryCount), 60000); // Max 60 seconds
+                console.log(`[Fetch] Rate limited, waiting ${backoffDelay/1000}s before retry (${retryCount + 1}/3)...`);
+                await new Promise(resolve => setTimeout(resolve, backoffDelay));
+                return fetchPage(cursor, retryCount + 1);
+            } else {
+                console.error(`[Fetch] Rate limited after ${retryCount + 1} retries, giving up`);
+                return null;
+            }
+        }
         console.error(`[Fetch] Error fetching page:`, error.message);
         return null;
     }
@@ -158,9 +170,14 @@ async function fetchBulkJobIds() {
         console.log(`[Fetch] Fetching page ${pagesFetched + 1}...`);
         let data;
         try {
-            data = await fetchPage(cursor);
+            data = await fetchPage(cursor, 0);
         } catch (error) {
             console.error(`[Fetch] Error on page ${pagesFetched + 1}:`, error.message);
+            // If rate limited, wait longer before continuing
+            if (error.message.includes('429') || error.message.includes('Too many requests')) {
+                console.log(`[Fetch] Rate limited, waiting 30 seconds before continuing...`);
+                await new Promise(resolve => setTimeout(resolve, 30000));
+            }
             // Continue to next page instead of breaking
             pagesFetched++;
             continue;
@@ -195,7 +212,9 @@ async function fetchBulkJobIds() {
             // 3. Must not be a VIP server
             // 4. Must not be a private server (with access code or PrivateServerId)
             // 5. Must not already be in cache
-            if (players >= MIN_PLAYERS && 
+            // 6. Must have valid jobId
+            if (jobId && 
+                players >= MIN_PLAYERS && 
                 players <= MAX_PLAYERS && 
                 !isVipServer && 
                 !isPrivateServer && 
@@ -218,7 +237,7 @@ async function fetchBulkJobIds() {
         }
         
         pagesFetched++;
-        console.log(`[Fetch] Page ${pagesFetched}: Added ${pageAdded} new job IDs, Filtered ${pageFiltered} (Full/Private/VIP) (Total: ${jobIdCache.jobIds.length}/${MAX_JOB_IDS}, Scanned: ${totalScanned})`);
+        console.log(`[Fetch] Page ${pagesFetched}: Added ${pageAdded} new job IDs, Filtered ${pageFiltered} (Full/Private/VIP/Invalid) (Total: ${jobIdCache.jobIds.length}/${MAX_JOB_IDS}, Scanned: ${totalScanned})`);
         
         cursor = data.nextPageCursor;
         if (!cursor) {
