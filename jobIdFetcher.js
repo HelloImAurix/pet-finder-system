@@ -2,13 +2,13 @@ const https = require('https');
 const fs = require('fs');
 const path = require('path');
 
-const PLACE_ID = 109983668079237;
+const PLACE_ID = parseInt(process.env.PLACE_ID, 10) || 109983668079237;
 const CACHE_FILE = path.join(__dirname, 'jobIds_cache.json');
-const MAX_JOB_IDS = 5000;
-const PAGES_TO_FETCH = 50;
-const DELAY_BETWEEN_REQUESTS = 5000;
-const MIN_PLAYERS = 1;
-const MAX_PLAYERS = 5; // Exclude full servers (6+ players)
+const MAX_JOB_IDS = parseInt(process.env.MAX_JOB_IDS || '5000', 10);
+const PAGES_TO_FETCH = parseInt(process.env.PAGES_TO_FETCH || '50', 10);
+const DELAY_BETWEEN_REQUESTS = parseInt(process.env.DELAY_BETWEEN_REQUESTS || '5000', 10);
+const MIN_PLAYERS = parseInt(process.env.MIN_PLAYERS || '1', 10);
+const MAX_PLAYERS = parseInt(process.env.MAX_PLAYERS || '5', 10); // Exclude full servers (6+ players)
 let jobIdCache = {
     jobIds: [],
     lastUpdated: null,
