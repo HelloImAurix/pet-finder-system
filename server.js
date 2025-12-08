@@ -31,6 +31,16 @@ app.use((req, res, next) => {
     next();
 });
 
+// Health check endpoint (no auth required, responds immediately)
+app.get('/health', (req, res) => {
+    res.json({ 
+        status: 'ok',
+        timestamp: Date.now(),
+        isFetching: isFetching,
+        cacheCount: jobIdFetcher ? jobIdFetcher.getCacheInfo().count : 0
+    });
+});
+
 const API_KEYS = {
     BOT: process.env.BOT_API_KEY || 'sablujihub-bot',
     GUI: process.env.GUI_API_KEY || 'sablujihub-gui',
@@ -528,10 +538,32 @@ app.get('/api/finds/all', authorize('ADMIN'), (req, res) => {
 
 app.get('/api/job-ids', authorize('BOT'), (req, res) => {
     try {
+        // Quick health check - respond immediately if server is fetching
+        if (isFetching && jobIdFetcher) {
+            const cacheInfo = jobIdFetcher.getCacheInfo();
+            // If we have some servers cached, return them even during fetch
+            if (cacheInfo && cacheInfo.count > 0) {
+                // Continue to return cached data below
+            } else {
+                // No cache yet, but fetch in progress
+                return res.json({
+                    success: true,
+                    jobIds: [],
+                    servers: [],
+                    count: 0,
+                    totalAvailable: 0,
+                    cacheInfo: cacheInfo,
+                    message: 'Cache is being fetched in background. Please retry in a few seconds.',
+                    isFetching: true
+                });
+            }
+        }
+        
         if (!jobIdFetcher) {
             return res.json({ 
                 success: true,
                 jobIds: [],
+                servers: [],
                 count: 0,
                 totalAvailable: 0,
                 cacheInfo: {
