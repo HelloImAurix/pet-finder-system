@@ -597,5 +597,32 @@ module.exports = {
                 placeId: PLACE_ID
             };
         }
+    },
+    removeJobId: (jobId) => {
+        try {
+            const jobIdStr = String(jobId);
+            const originalLength = jobIdCache.jobIds.length;
+            
+            jobIdCache.jobIds = jobIdCache.jobIds.filter(item => {
+                if (typeof item === 'string' || typeof item === 'number') {
+                    return String(item) !== jobIdStr;
+                }
+                if (typeof item === 'object' && item !== null && item.id) {
+                    return String(item.id) !== jobIdStr;
+                }
+                return true;
+            });
+            
+            const removed = originalLength - jobIdCache.jobIds.length;
+            if (removed > 0) {
+                console.log(`[Cache] Removed ${removed} instance(s) of job ID ${jobIdStr} from cache`);
+                saveCache(); // Save updated cache
+            }
+            
+            return removed > 0;
+        } catch (error) {
+            console.error('[Cache] Error removing job ID:', error.message);
+            return false;
+        }
     }
 };
