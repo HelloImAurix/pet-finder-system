@@ -556,26 +556,10 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
             });
         }
         
-        let jobIds = [];
-        try {
-            // Reload cache to get latest incremental saves
-            jobIdFetcher.loadCache();
-            
-            // Use freshest servers if available, otherwise fall back to regular getJobIds
-            if (typeof jobIdFetcher.getFreshestJobIds === 'function') {
-                jobIds = jobIdFetcher.getFreshestJobIds(limit * 2); // Get more to filter
-            } else {
-                jobIds = jobIdFetcher.getJobIds();
-            }
-            if (!Array.isArray(jobIds)) {
-                jobIds = [];
-            }
-        } catch (getError) {
-            console.error('[Servers] Error getting job IDs:', getError.message);
-            jobIds = [];
-        }
+        const cacheInfo = jobIdFetcher.getCacheInfo();
+        const hasServers = cacheInfo && cacheInfo.count > 0;
         
-        if (jobIds.length === 0) {
+        if (!hasServers) {
             // If not already fetching, start a background fetch
             if (!isFetching) {
                 isFetching = true;
@@ -606,30 +590,64 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
             });
         }
         
-        const excludeSet = new Set(exclude);
-        jobIds = jobIds.filter(id => !excludeSet.has(id.toString()));
+        // Get servers with full metadata if available
+        let serversWithMetadata = [];
+        try {
+            if (typeof jobIdFetcher.getFreshestServers === 'function') {
+                serversWithMetadata = jobIdFetcher.getFreshestServers(limit * 2);
+            } else if (typeof jobIdFetcher.getFreshestJobIds === 'function') {
+                // Fallback: Get job IDs and create basic server objects
+                const jobIds = jobIdFetcher.getFreshestJobIds(limit * 2);
+                serversWithMetadata = jobIds.map((id, index) => ({
+                    id: id.toString(),
+                    players: 0,
+                    maxPlayers: 8,
+                    timestamp: Date.now() - (index * 1000)
+                }));
+            } else {
+                const jobIds = jobIdFetcher.getJobIds();
+                serversWithMetadata = jobIds.map((id, index) => ({
+                    id: id.toString(),
+                    players: 0,
+                    maxPlayers: 8,
+                    timestamp: Date.now() - (index * 1000)
+                }));
+            }
+        } catch (getError) {
+            console.error('[Servers] Error getting servers:', getError.message);
+            serversWithMetadata = [];
+        }
         
-        if (jobIds.length === 0) {
+        // Filter out excluded servers
+        const excludeSet = new Set(exclude);
+        serversWithMetadata = serversWithMetadata.filter(server => !excludeSet.has(server.id));
+        
+        if (serversWithMetadata.length === 0) {
             return res.json({
                 success: true,
                 jobIds: [],
+                servers: [],
                 count: 0,
                 totalAvailable: 0,
-                cacheInfo: jobIdFetcher.getCacheInfo(),
+                cacheInfo: cacheInfo,
                 message: 'All job IDs were excluded or cache is empty'
             });
         }
         
-        const shuffled = jobIds.sort(() => Math.random() - 0.5);
-        const result = shuffled.slice(0, limit);
+        const totalAvailable = serversWithMetadata.length;
+        const limited = serversWithMetadata.slice(0, limit);
+        
+        // Extract job IDs for backward compatibility
+        const jobIdsOnly = limited.map(s => s.id);
         
         res.json({
             success: true,
-            jobIds: result,
-            count: result.length,
-            totalAvailable: jobIds.length,
-            cacheInfo: jobIdFetcher.getCacheInfo(),
-            message: `Returned ${result.length} of ${jobIds.length} available fresh servers`
+            jobIds: jobIdsOnly, // Backward compatible: flat array
+            servers: limited, // Enhanced: Full objects with metadata (players, maxPlayers, timestamp)
+            count: limited.length,
+            totalAvailable: totalAvailable,
+            cacheInfo: cacheInfo,
+            hasMetadata: limited.length > 0 && (limited[0].players !== undefined || limited[0].timestamp !== undefined) // Check if metadata exists
         });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
