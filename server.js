@@ -60,23 +60,24 @@ app.use((req, res, next) => {
 });
 
 // Health check endpoint (no auth required, responds immediately)
-// This should be super fast - no async operations, no dependencies
+// Railway uses this to verify the server is alive
 app.get('/health', (req, res) => {
-    // Absolute minimum - just respond immediately
-    try {
-        res.json({ 
-            status: 'ok',
-            timestamp: Date.now()
-        });
-    } catch (error) {
-        // Even if JSON fails, send plain text
-        try {
-            res.status(200).send('ok');
-        } catch (e) {
-            // Last resort
-            res.end();
+    // Absolute minimum - respond immediately, no dependencies
+    res.status(200).json({ status: 'ok' });
+});
+
+// Root endpoint - respond quickly for Railway health checks
+app.get('/', (req, res) => {
+    res.json({ 
+        message: 'Pet Finder API Server',
+        status: 'running',
+        endpoints: {
+            'GET /health': 'Health check',
+            'POST /api/pet-found': 'Receive pet finds from bots',
+            'GET /api/job-ids': 'Get cached job IDs for server hopping',
+            'GET /api/job-ids/info': 'Get cache info'
         }
-    }
+    });
 });
 
 const API_KEYS = {
@@ -812,29 +813,10 @@ app.post('/api/job-ids/refresh', authorize('ADMIN'), (req, res) => {
     }
 });
 
-app.get('/', (req, res) => {
-    res.json({ 
-        message: 'Pet Finder API Server',
-        endpoints: {
-            'POST /api/pet-found': 'Receive pet finds from bots',
-            'GET /api/finds': 'Get all finds',
-            'GET /api/finds/recent': 'Get recent finds',
-            'DELETE /api/finds': 'Clear all finds',
-            'GET /api/health': 'Health check',
-            'GET /api/job-ids': 'Get cached job IDs for server hopping',
-            'GET /api/job-ids/info': 'Get cache info',
-            'POST /api/job-ids/refresh': 'Manually refresh job ID cache'
-        }
-    });
-});
+// Root endpoint already defined earlier, no duplicate needed
 
-// Job fetcher initialization moved to server.on('listening') below
-
-setInterval(() => {
-    cleanupOldFinds();
-}, 60 * 60 * 1000);
-
-cleanupOldFinds();
+// Start server FIRST before any cleanup or background tasks
+// This ensures Railway can connect immediately
 
 // Error handling for uncaught exceptions
 process.on('uncaughtException', (error) => {
@@ -849,13 +831,16 @@ process.on('unhandledRejection', (reason, promise) => {
     // Don't exit - let the server try to continue
 });
 
-// Start server - this MUST complete successfully
+// Start server IMMEDIATELY - this MUST be first, before any background tasks
+// Railway needs the server to be listening ASAP for health checks
 let server = null;
 try {
+    console.log('[Server] Starting server on port', PORT, '...');
     server = app.listen(PORT, '0.0.0.0', () => {
         console.log('='.repeat(60));
         console.log(`[Server] ✅ Pet Finder API Server running on port ${PORT}`);
         console.log(`[Server] Listening on: 0.0.0.0:${PORT}`);
+        console.log(`[Server] Environment PORT: ${process.env.PORT || 'not set'}`);
         console.log(`[Server] Health check: http://localhost:${PORT}/health`);
         console.log(`[Server] Job IDs endpoint: http://localhost:${PORT}/api/job-ids`);
         if (jobIdFetcher) {
@@ -866,12 +851,35 @@ try {
         console.log('='.repeat(60));
         console.log('[Server] Server is ready to accept connections');
         
-        // Verify server is actually listening
+        // Verify server is actually listening and get address info
         if (server && server.listening) {
-            console.log('[Server] ✅ Server confirmed listening on port', PORT);
+            const addr = server.address();
+            console.log('[Server] ✅ Server confirmed listening');
+            console.log('[Server] Address:', addr);
+            console.log('[Server] Family:', addr.family);
+            console.log('[Server] Port:', addr.port);
         } else {
             console.error('[Server] ❌ WARNING: Server may not be listening!');
         }
+        
+        // Test that we can actually handle a request
+        console.log('[Server] Testing internal health endpoint...');
+        const http = require('http');
+        const testReq = http.get(`http://localhost:${PORT}/health`, (testRes) => {
+            let data = '';
+            testRes.on('data', (chunk) => { data += chunk; });
+            testRes.on('end', () => {
+                console.log('[Server] ✅ Internal health check successful:', testRes.statusCode);
+                console.log('[Server] Response:', data.substring(0, 100));
+            });
+        });
+        testReq.on('error', (err) => {
+            console.error('[Server] ❌ Internal health check failed:', err.message);
+        });
+        testReq.setTimeout(2000, () => {
+            testReq.destroy();
+            console.error('[Server] ❌ Internal health check timed out');
+        });
     });
     
     server.on('error', (error) => {
