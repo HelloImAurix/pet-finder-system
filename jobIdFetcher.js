@@ -4,9 +4,9 @@ const path = require('path');
 
 const PLACE_ID = parseInt(process.env.PLACE_ID, 10) || 109983668079237;
 const CACHE_FILE = path.join(__dirname, 'jobIds_cache.json');
-const MAX_JOB_IDS = parseInt(process.env.MAX_JOB_IDS || '5000', 10);
-const PAGES_TO_FETCH = parseInt(process.env.PAGES_TO_FETCH || '50', 10);
-const DELAY_BETWEEN_REQUESTS = parseInt(process.env.DELAY_BETWEEN_REQUESTS || '5000', 10);
+const MAX_JOB_IDS = parseInt(process.env.MAX_JOB_IDS || '1000', 10);
+const PAGES_TO_FETCH = parseInt(process.env.PAGES_TO_FETCH || '15', 10);
+const DELAY_BETWEEN_REQUESTS = parseInt(process.env.DELAY_BETWEEN_REQUESTS || '2000', 10);
 const MIN_PLAYERS = parseInt(process.env.MIN_PLAYERS || '1', 10);
 const MAX_PLAYERS = parseInt(process.env.MAX_PLAYERS || '5', 10); // Exclude full servers (6+ players)
 let jobIdCache = {
@@ -54,11 +54,17 @@ function loadCache() {
 
 function cleanCache() {
     // Remove any invalid entries and ensure we only have valid job IDs
+    // Handle both old format (strings) and new format (objects with timestamps)
     if (Array.isArray(jobIdCache.jobIds)) {
         const originalLength = jobIdCache.jobIds.length;
-        jobIdCache.jobIds = jobIdCache.jobIds.filter(id => {
-            // Keep only valid job IDs (non-null, non-undefined, string or number)
-            return id !== null && id !== undefined && id !== '';
+        jobIdCache.jobIds = jobIdCache.jobIds.filter(item => {
+            if (typeof item === 'string' || typeof item === 'number') {
+                return item !== null && item !== undefined && item !== '';
+            }
+            if (typeof item === 'object' && item !== null) {
+                return item.id !== null && item.id !== undefined && item.id !== '';
+            }
+            return false;
         });
         if (originalLength !== jobIdCache.jobIds.length) {
             console.log(`[Cache] Cleaned ${originalLength - jobIdCache.jobIds.length} invalid entries from cache`);
@@ -106,7 +112,7 @@ function makeRequest(url) {
 }
 
 async function fetchPage(cursor = null) {
-    let url = `https://games.roblox.com/v1/games/${PLACE_ID}/servers/Public?sortOrder=Asc&limit=100`;
+    let url = `https://games.roblox.com/v1/games/${PLACE_ID}/servers/Public?sortOrder=Desc&limit=100`;
     if (cursor) {
         url += `&cursor=${cursor}`;
     }
@@ -122,10 +128,11 @@ async function fetchPage(cursor = null) {
 
 async function fetchBulkJobIds() {
     console.log(`[Fetch] Starting bulk fetch for place ID: ${PLACE_ID}`);
-    console.log(`[Fetch] Target: ${MAX_JOB_IDS} job IDs, fetching up to ${PAGES_TO_FETCH} pages`);
+    console.log(`[Fetch] Target: ${MAX_JOB_IDS} FRESHEST job IDs, fetching up to ${PAGES_TO_FETCH} pages`);
+    console.log(`[Fetch] Sort Order: Desc (newest servers first)`);
     console.log(`[Fetch] Filtering: Only servers with ${MIN_PLAYERS}-${MAX_PLAYERS} players (excluding full servers)`);
     console.log(`[Fetch] Filtering: Excluding VIP servers and private servers`);
-    console.log(`[Fetch] This will refresh the entire cache with fresh servers`);
+    console.log(`[Fetch] This will refresh the entire cache with the freshest servers`);
     
     jobIdCache.jobIds = [];
     const existingJobIds = new Set();
@@ -170,7 +177,13 @@ async function fetchBulkJobIds() {
                 !isPrivateServer && 
                 !existingJobIds.has(jobId) && 
                 jobIdCache.jobIds.length < MAX_JOB_IDS) {
-                jobIdCache.jobIds.push(jobId);
+                // Store with timestamp for freshness tracking
+                jobIdCache.jobIds.push({
+                    id: jobId,
+                    timestamp: Date.now(),
+                    players: players,
+                    maxPlayers: maxPlayers
+                });
                 existingJobIds.add(jobId);
                 pageAdded++;
                 totalAdded++;
@@ -250,9 +263,38 @@ module.exports = {
     cleanCache,
     getJobIds: () => {
         try {
-            return jobIdCache.jobIds || [];
+            const ids = jobIdCache.jobIds || [];
+            // Convert to array of job IDs, handling both old format (strings) and new format (objects)
+            return ids.map(item => {
+                if (typeof item === 'string' || typeof item === 'number') return item;
+                if (typeof item === 'object' && item !== null && item.id) return item.id;
+                return item;
+            });
         } catch (error) {
             console.error('[Cache] Error getting job IDs:', error.message);
+            return [];
+        }
+    },
+    getFreshestJobIds: (limit = 1000) => {
+        try {
+            const ids = jobIdCache.jobIds || [];
+            // Sort by timestamp (newest first), then take limit
+            const sorted = ids
+                .filter(item => {
+                    if (typeof item === 'string' || typeof item === 'number') return true;
+                    if (typeof item === 'object' && item !== null && item.id) return true;
+                    return false;
+                })
+                .sort((a, b) => {
+                    const tsA = typeof a === 'object' ? (a.timestamp || 0) : Date.now();
+                    const tsB = typeof b === 'object' ? (b.timestamp || 0) : Date.now();
+                    return tsB - tsA; // Newest first
+                })
+                .slice(0, limit)
+                .map(item => typeof item === 'object' ? item.id : item);
+            return sorted;
+        } catch (error) {
+            console.error('[Cache] Error getting freshest job IDs:', error.message);
             return [];
         }
     },
