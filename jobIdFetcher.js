@@ -191,12 +191,27 @@ async function fetchBulkJobIds() {
         let pageAdded = 0;
         let pageFiltered = 0;
         let filterStats = { full: 0, vip: 0, private: 0, invalid: 0, duplicate: 0, tooMany: 0, lowPlayers: 0 };
+        let sampleServers = []; // Store first 5 servers for debugging
         
         for (const server of data.data) {
             totalScanned++;
             const jobId = server.id;
             const players = server.playing || 0;
             const maxPlayers = server.maxPlayers || 6;
+            
+            // Debug: Store sample of first few servers from first page
+            if (pagesFetched === 1 && totalScanned <= 5) {
+                sampleServers.push({ 
+                    jobId, 
+                    players, 
+                    maxPlayers, 
+                    vip: server.vipServerId !== null && server.vipServerId !== undefined,
+                    private: (server.accessCode !== null && server.accessCode !== undefined) ||
+                            (server.PrivateServerId !== null && server.PrivateServerId !== undefined) ||
+                            (server.privateServerId !== null && server.privateServerId !== undefined),
+                    isFull: players >= maxPlayers
+                });
+            }
             
             // Filter VIP servers
             const isVipServer = server.vipServerId !== null && server.vipServerId !== undefined;
@@ -285,8 +300,18 @@ async function fetchBulkJobIds() {
         const filterSummary = filterDetails.length > 0 ? filterDetails.join(', ') : 'none';
         console.log(`[Fetch] Page ${pagesFetched}: Added ${pageAdded} new job IDs, Filtered ${pageFiltered} (${filterSummary}) (Total: ${jobIdCache.jobIds.length}/${MAX_JOB_IDS}, Scanned: ${totalScanned})`);
         
+        // Debug: Log sample servers from first page
+        if (pagesFetched === 1 && sampleServers.length > 0) {
+            console.log(`[Fetch] DEBUG - Sample servers (first ${sampleServers.length}):`);
+            sampleServers.forEach((s, i) => {
+                const jobIdShort = s.jobId ? s.jobId.toString().substring(0, 12) + '...' : 'null';
+                console.log(`[Fetch]   ${i+1}. JobId: ${jobIdShort}, Players: ${s.players}/${s.maxPlayers}, Full: ${s.isFull ? 'YES' : 'NO'}, VIP: ${s.vip ? 'YES' : 'NO'}, Private: ${s.private ? 'YES' : 'NO'}`);
+            });
+        }
+        
         // Reset filter stats for next page
         filterStats = { full: 0, vip: 0, private: 0, invalid: 0, duplicate: 0, tooMany: 0, lowPlayers: 0 };
+        sampleServers = [];
         
         cursor = data.nextPageCursor;
         if (!cursor) {
