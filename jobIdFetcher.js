@@ -54,12 +54,14 @@ function loadCache() {
 }
 
 function cleanCache() {
-    // Remove any invalid entries and expired job IDs
+    // Remove any invalid entries, expired job IDs, and full servers
     // Handle both old format (strings) and new format (objects with timestamps)
     if (Array.isArray(jobIdCache.jobIds)) {
         const originalLength = jobIdCache.jobIds.length;
         const now = Date.now();
         const maxAge = JOB_ID_MAX_AGE_MS;
+        let expiredCount = 0;
+        let fullCount = 0;
         
         jobIdCache.jobIds = jobIdCache.jobIds.filter(item => {
             // Check validity
@@ -74,13 +76,30 @@ function cleanCache() {
                 }
                 // Check if expired
                 const age = now - (item.timestamp || 0);
-                return age < maxAge; // Only keep if less than max age
+                if (age >= maxAge) {
+                    expiredCount++;
+                    return false; // Expired
+                }
+                // CRITICAL: Remove full servers (players >= maxPlayers)
+                // This ensures we never serve full servers even if they somehow got cached
+                const players = item.players || 0;
+                const maxPlayers = item.maxPlayers || 8;
+                if (players >= maxPlayers) {
+                    fullCount++;
+                    return false; // Full server
+                }
+                return true; // Valid, not expired, and has available slots
             }
             return false;
         });
         
-        if (originalLength !== jobIdCache.jobIds.length) {
-            console.log(`[Cache] Cleaned ${originalLength - jobIdCache.jobIds.length} invalid/expired entries from cache`);
+        const removedCount = originalLength - jobIdCache.jobIds.length;
+        if (removedCount > 0) {
+            const details = [];
+            if (expiredCount > 0) details.push(`${expiredCount} expired`);
+            if (fullCount > 0) details.push(`${fullCount} full`);
+            const detailStr = details.length > 0 ? ` (${details.join(', ')})` : '';
+            console.log(`[Cache] Cleaned ${removedCount} invalid/expired/full entries from cache${detailStr}`);
         }
     }
 }
@@ -135,6 +154,8 @@ function makeRequest(url) {
 }
 
 async function fetchPage(cursor = null, retryCount = 0) {
+    // CRITICAL: excludeFullGames=true tells Roblox API to exclude full servers at the API level
+    // We also filter client-side as a backup (defensive programming)
     let url = `https://games.roblox.com/v1/games/${PLACE_ID}/servers/Public?sortOrder=Desc&limit=100&excludeFullGames=true`;
     if (cursor) {
         url += `&cursor=${cursor}`;
@@ -179,8 +200,43 @@ async function fetchBulkJobIds() {
     console.log(`[Fetch] Only servers with available slots (7/8 or less) will be cached`);
     console.log(`[Fetch] Incremental caching: Will save cache every 100 servers for immediate availability`);
     
-    jobIdCache.jobIds = [];
-    const existingJobIds = new Set();
+    // Clean expired entries first, then keep non-expired ones
+    const now = Date.now();
+    const maxAge = JOB_ID_MAX_AGE_MS;
+    const beforeCleanup = jobIdCache.jobIds.length;
+    const existingValidIds = new Set();
+    
+    // Filter out expired entries and build a map of valid existing servers
+    const validExistingServers = jobIdCache.jobIds.filter(item => {
+        if (typeof item === 'string' || typeof item === 'number') {
+            // Old format - keep but mark as potentially stale
+            const id = String(item);
+            if (existingValidIds.has(id)) return false;
+            existingValidIds.add(id);
+            return true;
+        }
+        if (typeof item === 'object' && item !== null && item.id) {
+            const age = now - (item.timestamp || 0);
+            if (age >= maxAge) {
+                return false; // Expired
+            }
+            const id = String(item.id);
+            if (existingValidIds.has(id)) return false; // Duplicate
+            existingValidIds.add(id);
+            return true; // Valid and not expired
+        }
+        return false; // Invalid format
+    });
+    
+    const expiredCount = beforeCleanup - validExistingServers.length;
+    if (expiredCount > 0) {
+        console.log(`[Fetch] Removed ${expiredCount} expired/stale servers from cache`);
+    }
+    console.log(`[Fetch] Keeping ${validExistingServers.length} valid non-expired servers`);
+    
+    // Start with valid existing servers, then add new ones
+    jobIdCache.jobIds = [...validExistingServers];
+    const existingJobIds = new Set(existingValidIds); // Track all IDs (existing + new) to avoid duplicates
     let cursor = null;
     let pagesFetched = 0;
     let totalAdded = 0;
@@ -259,24 +315,10 @@ async function fetchBulkJobIds() {
                 pageFiltered++;
                 continue;
             }
-            // Validate maxPlayers value
-            if (!maxPlayers || maxPlayers <= 0 || maxPlayers > 20) {
-                filterStats.invalid++;
-                pageFiltered++;
-                continue;
-            }
-            
-            // Validate players value
-            if (players < 0 || players > maxPlayers) {
-                filterStats.invalid++;
-                pageFiltered++;
-                continue;
-            }
-            
-            // Exclude full servers: Only allow servers with players < maxPlayers (7/8 or less)
-            // Also exclude servers very close to full (6/8 or less) to prevent race conditions
-            // This means: 6/8 or less = allowed, 7/8 or 8/8 = filtered out
-            if (players >= (maxPlayers - 1)) {
+            // CRITICAL: Exclude full servers - only allow servers with available slots
+            // Players must be strictly less than maxPlayers (7/8 allowed, 8/8 rejected)
+            // This is a backup check in case excludeFullGames=true API parameter fails
+            if (players >= maxPlayers) {
                 filterStats.full++;
                 pageFiltered++;
                 continue;
@@ -288,13 +330,13 @@ async function fetchBulkJobIds() {
                 continue;
             }
             
-            // Server passed all filters
+            // Server passed all filters - FINAL CHECK: ensure not full
+            // Double-check that server is not full (defensive programming in case API parameter fails)
             // Only allow servers with players < maxPlayers (7/8 or less, not 8/8)
             // Allow empty servers (players === 0) as they have slots available
-            // VIP check removed - public servers list shouldn't contain VIP servers
             if (jobId && 
+                players < maxPlayers &&  // CRITICAL: Only allow servers with available slots (players < maxPlayers)
                 (players === 0 || players >= MIN_PLAYERS) &&  // Allow empty servers or servers with min players
-                players < maxPlayers &&  // Only allow 7/8 or less (players < maxPlayers means 7 < 8, not 8 < 8)
                 !isPrivateServer && 
                 !existingJobIds.has(jobId) && 
                 jobIdCache.jobIds.length < MAX_JOB_IDS) {
@@ -366,9 +408,41 @@ async function fetchBulkJobIds() {
         }
     }
     
+    // Sort all servers by timestamp (newest first) and limit to MAX_JOB_IDS
+    const beforeSort = jobIdCache.jobIds.length;
+    jobIdCache.jobIds.sort((a, b) => {
+        const tsA = typeof a === 'object' && a !== null ? (a.timestamp || 0) : Date.now();
+        const tsB = typeof b === 'object' && b !== null ? (b.timestamp || 0) : Date.now();
+        return tsB - tsA; // Newest first
+    });
+    
+    // Limit to MAX_JOB_IDS, keeping only the freshest
+    if (jobIdCache.jobIds.length > MAX_JOB_IDS) {
+        const removed = jobIdCache.jobIds.length - MAX_JOB_IDS;
+        jobIdCache.jobIds = jobIdCache.jobIds.slice(0, MAX_JOB_IDS);
+        console.log(`[Fetch] Limited cache to ${MAX_JOB_IDS} freshest servers (removed ${removed} older entries)`);
+    }
+    
+    // Final cleanup: Remove any expired entries one more time (in case any slipped through)
+    const finalBeforeCleanup = jobIdCache.jobIds.length;
+    jobIdCache.jobIds = jobIdCache.jobIds.filter(item => {
+        if (typeof item === 'string' || typeof item === 'number') return true;
+        if (typeof item === 'object' && item !== null && item.id) {
+            const age = Date.now() - (item.timestamp || 0);
+            return age < maxAge;
+        }
+        return false;
+    });
+    const finalExpiredRemoved = finalBeforeCleanup - jobIdCache.jobIds.length;
+    if (finalExpiredRemoved > 0) {
+        console.log(`[Fetch] Final cleanup: Removed ${finalExpiredRemoved} expired entries`);
+    }
+    
     jobIdCache.totalFetched = jobIdCache.jobIds.length;
+    const keptFromOld = validExistingServers.length;
     console.log(`[Fetch] Bulk fetch complete!`);
     console.log(`[Fetch] Total job IDs cached: ${jobIdCache.jobIds.length}/${MAX_JOB_IDS}`);
+    console.log(`[Fetch] Kept from old cache: ${keptFromOld} (removed ${expiredCount} expired)`);
     console.log(`[Fetch] Fresh servers added: ${totalAdded}`);
     console.log(`[Fetch] Servers filtered (Full/Private): ${totalFiltered}`);
     console.log(`[Fetch] Total servers scanned: ${totalScanned}`);
@@ -382,7 +456,7 @@ async function fetchBulkJobIds() {
         console.log(`[Fetch] ⚠️  Warning: Only cached ${jobIdCache.jobIds.length} job IDs, target was ${MAX_JOB_IDS}`);
         console.log(`[Fetch] Consider increasing PAGES_TO_FETCH (currently ${PAGES_TO_FETCH}) if you need more servers`);
     } else {
-        console.log(`[Fetch] ✅ Success: Cached full ${MAX_JOB_IDS} job IDs!`);
+        console.log(`[Fetch] ✅ Success: Cache refreshed with ${MAX_JOB_IDS} freshest job IDs!`);
     }
     
     return {
@@ -500,42 +574,26 @@ module.exports = {
             const now = Date.now();
             const maxAge = JOB_ID_MAX_AGE_MS;
             
-            // Filter out expired job IDs and return full server objects with metadata
+            // Filter out expired job IDs and full servers, return full server objects with metadata
             const sorted = ids
                 .filter(item => {
                     // Check if item is valid and not expired
                     if (typeof item === 'string' || typeof item === 'number') {
-                        // Old format - assume it's still valid (no timestamp)
+                        // Old format - assume it's still valid (no timestamp, no player count)
                         return true;
                     }
                     if (typeof item === 'object' && item !== null && item.id) {
                         // New format - check if expired
                         const age = now - (item.timestamp || 0);
-                        if (age >= maxAge) {
-                            return false; // Expired
-                        }
+                        if (age >= maxAge) return false; // Expired
                         
-                        // Additional validation: Check if server is full
+                        // CRITICAL: Filter out full servers (players >= maxPlayers)
+                        // This is a defensive check in case any full servers somehow got cached
                         const players = item.players || 0;
                         const maxPlayers = item.maxPlayers || 8;
+                        if (players >= maxPlayers) return false; // Full server
                         
-                        // Validate maxPlayers
-                        if (!maxPlayers || maxPlayers <= 0 || maxPlayers > 20) {
-                            return false; // Invalid maxPlayers
-                        }
-                        
-                        // Validate players
-                        if (players < 0 || players > maxPlayers) {
-                            return false; // Invalid players
-                        }
-                        
-                        // Filter out full servers (players >= maxPlayers)
-                        // Also filter out servers very close to full (within 1 slot)
-                        if (players >= maxPlayers || players >= (maxPlayers - 1)) {
-                            return false; // Full or too close to full
-                        }
-                        
-                        return true; // Valid and not full
+                        return true;
                     }
                     return false;
                 })
@@ -598,33 +656,6 @@ module.exports = {
                 lastUpdated: null,
                 placeId: PLACE_ID
             };
-        }
-    },
-    removeJobId: (jobId) => {
-        try {
-            const jobIdStr = String(jobId);
-            const originalLength = jobIdCache.jobIds.length;
-            
-            jobIdCache.jobIds = jobIdCache.jobIds.filter(item => {
-                if (typeof item === 'string' || typeof item === 'number') {
-                    return String(item) !== jobIdStr;
-                }
-                if (typeof item === 'object' && item !== null && item.id) {
-                    return String(item.id) !== jobIdStr;
-                }
-                return true;
-            });
-            
-            const removed = originalLength - jobIdCache.jobIds.length;
-            if (removed > 0) {
-                console.log(`[Cache] Removed ${removed} instance(s) of job ID ${jobIdStr} from cache`);
-                saveCache(); // Save updated cache
-            }
-            
-            return removed > 0;
-        } catch (error) {
-            console.error('[Cache] Error removing job ID:', error.message);
-            return false;
         }
     }
 };
