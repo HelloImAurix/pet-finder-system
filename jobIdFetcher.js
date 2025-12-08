@@ -26,13 +26,8 @@ function loadCache() {
                 jobIdCache = parsed;
                 const originalLength = jobIdCache.jobIds.length;
                 cleanCache();
-                if (originalLength !== jobIdCache.jobIds.length) {
-                    console.log(`[Cache] Cleaned ${originalLength - jobIdCache.jobIds.length} invalid entries on load`);
-                }
-                console.log(`[Cache] Loaded ${jobIdCache.jobIds.length} job IDs from cache`);
                 return true;
             } else {
-                console.warn('[Cache] Cache file has invalid structure, resetting...');
                 jobIdCache = {
                     jobIds: [],
                     lastUpdated: null,
@@ -42,7 +37,6 @@ function loadCache() {
             }
         }
     } catch (error) {
-        console.warn('[Cache] Failed to load cache:', error.message);
         jobIdCache = {
             jobIds: [],
             lastUpdated: null,
@@ -96,15 +90,6 @@ function cleanCache() {
             return false;
         });
         
-        const removedCount = originalLength - jobIdCache.jobIds.length;
-        if (removedCount > 0) {
-            const details = [];
-            if (expiredCount > 0) details.push(`${expiredCount} expired`);
-            if (fullCount > 0) details.push(`${fullCount} full`);
-            if (invalidCount > 0) details.push(`${invalidCount} invalid`);
-            const detailStr = details.length > 0 ? ` (${details.join(', ')})` : '';
-            console.log(`[Cache] Cleaned ${removedCount} invalid/expired/full entries from cache${detailStr}`);
-        }
     }
 }
 
@@ -113,7 +98,6 @@ function saveCache() {
         cleanCache();
         jobIdCache.lastUpdated = new Date().toISOString();
         fs.writeFileSync(CACHE_FILE, JSON.stringify(jobIdCache, null, 2));
-        console.log(`[Cache] Saved ${jobIdCache.jobIds.length} job IDs to cache`);
         return true;
     } catch (error) {
         console.error('[Cache] Failed to save cache:', error.message);
@@ -169,37 +153,23 @@ async function fetchPage(cursor = null, retryCount = 0) {
         if (error.message.includes('429') || error.message.includes('Rate limited')) {
             if (retryCount < 3) {
                 const backoffDelay = Math.min(10000 * Math.pow(2, retryCount), 60000);
-                console.log(`[Fetch] Rate limited, waiting ${backoffDelay/1000}s before retry (${retryCount + 1}/3)...`);
                 await new Promise(resolve => setTimeout(resolve, backoffDelay));
                 return fetchPage(cursor, retryCount + 1);
             } else {
-                console.error(`[Fetch] Rate limited after ${retryCount + 1} retries, giving up`);
                 return null;
             }
         }
         if (error.message.includes('timeout')) {
             if (retryCount < 2) {
-                console.log(`[Fetch] Timeout, retrying (${retryCount + 1}/2)...`);
                 await new Promise(resolve => setTimeout(resolve, 2000));
                 return fetchPage(cursor, retryCount + 1);
             }
         }
-        console.error(`[Fetch] Error fetching page:`, error.message);
         return null;
     }
 }
 
 async function fetchBulkJobIds() {
-    console.log(`[Fetch] Starting bulk fetch for place ID: ${PLACE_ID}`);
-    console.log(`[Fetch] Target: ${MAX_JOB_IDS} FRESHEST job IDs, fetching up to ${PAGES_TO_FETCH} pages`);
-    console.log(`[Fetch] Delay between requests: ${DELAY_BETWEEN_REQUESTS}ms (to avoid rate limiting)`);
-    console.log(`[Fetch] Estimated max time: ${Math.ceil((PAGES_TO_FETCH * DELAY_BETWEEN_REQUESTS) / 60000)} minutes`);
-    console.log(`[Fetch] Sort Order: Desc (newest servers first)`);
-    console.log(`[Fetch] Using excludeFullGames=true parameter to exclude full servers at API level`);
-    console.log(`[Fetch] Filtering: Only caching servers with 7/8 or less players (players < maxPlayers)`);
-    console.log(`[Fetch] Filtering: Excluding private servers (VIP check removed - public list only)`);
-    console.log(`[Fetch] Only servers with available slots (7/8 or less) will be cached`);
-    console.log(`[Fetch] Incremental caching: Will save cache every 100 servers for immediate availability`);
     
     const now = Date.now();
     const maxAge = JOB_ID_MAX_AGE_MS;
@@ -226,11 +196,6 @@ async function fetchBulkJobIds() {
         return false;
     });
     
-    const expiredCount = beforeCleanup - validExistingServers.length;
-    if (expiredCount > 0) {
-        console.log(`[Fetch] Removed ${expiredCount} expired/stale servers from cache`);
-    }
-    console.log(`[Fetch] Keeping ${validExistingServers.length} valid non-expired servers`);
     
     jobIdCache.jobIds = [...validExistingServers];
     const existingJobIds = new Set(existingValidIds);
@@ -248,14 +213,11 @@ async function fetchBulkJobIds() {
             await new Promise(resolve => setTimeout(resolve, DELAY_BETWEEN_REQUESTS));
         }
         
-        console.log(`[Fetch] Fetching page ${pagesFetched + 1}/${PAGES_TO_FETCH}...`);
         let data;
         try {
             data = await fetchPage(cursor, 0);
         } catch (error) {
-            console.error(`[Fetch] Error on page ${pagesFetched + 1}:`, error.message);
             if (error.message.includes('429') || error.message.includes('Too many requests')) {
-                console.log(`[Fetch] Rate limited, waiting 30 seconds before continuing...`);
                 await new Promise(resolve => setTimeout(resolve, 30000));
             }
             pagesFetched++;
@@ -263,7 +225,6 @@ async function fetchBulkJobIds() {
         }
         
         if (!data || !data.data || data.data.length === 0) {
-            console.log(`[Fetch] No more data available from API`);
             break;
         }
         
@@ -344,9 +305,6 @@ async function fetchBulkJobIds() {
         if (filterStats.invalid > 0) filterDetails.push(`${filterStats.invalid} invalid`);
         if (filterStats.tooMany > 0) filterDetails.push(`${filterStats.tooMany} cache full`);
         
-        const filterSummary = filterDetails.length > 0 ? filterDetails.join(', ') : 'none';
-        console.log(`[Fetch] Page ${pagesFetched}: Added ${pageAdded} new job IDs (7/8 or less players), Filtered ${pageFiltered} (${filterSummary}) (Total: ${jobIdCache.jobIds.length}/${MAX_JOB_IDS}, Scanned: ${totalScanned})`);
-        
         const currentCount = jobIdCache.jobIds.length;
         if (currentCount - lastSaveCount >= 100) {
             await new Promise((resolve) => {
@@ -355,9 +313,8 @@ async function fetchBulkJobIds() {
                         jobIdCache.lastUpdated = new Date().toISOString();
                         jobIdCache.totalFetched = currentCount;
                         fs.writeFileSync(CACHE_FILE, JSON.stringify(jobIdCache, null, 2));
-                        console.log(`[Fetch] 💾 Incremental save: Saved ${currentCount} servers to cache (available for API)`);
                     } catch (saveError) {
-                        console.warn(`[Fetch] Failed to save cache incrementally: ${saveError.message}`);
+                        console.error(`[Fetch] Failed to save cache incrementally: ${saveError.message}`);
                     }
                     resolve();
                 });
@@ -368,7 +325,6 @@ async function fetchBulkJobIds() {
         await new Promise(resolve => setImmediate(resolve));
         
         if (jobIdCache.jobIds.length >= MAX_JOB_IDS) {
-            console.log(`[Fetch] ✅ Reached target of ${MAX_JOB_IDS} servers with 7/8 or less players, stopping fetch early`);
             break;
         }
         
@@ -376,7 +332,6 @@ async function fetchBulkJobIds() {
         
         cursor = data.nextPageCursor;
         if (!cursor) {
-            console.log(`[Fetch] No more pages available`);
             break;
         }
     }
@@ -389,12 +344,9 @@ async function fetchBulkJobIds() {
     });
     
     if (jobIdCache.jobIds.length > MAX_JOB_IDS) {
-        const removed = jobIdCache.jobIds.length - MAX_JOB_IDS;
         jobIdCache.jobIds = jobIdCache.jobIds.slice(0, MAX_JOB_IDS);
-        console.log(`[Fetch] Limited cache to ${MAX_JOB_IDS} freshest servers (removed ${removed} older entries)`);
     }
     
-    const finalBeforeCleanup = jobIdCache.jobIds.length;
     jobIdCache.jobIds = jobIdCache.jobIds.filter(item => {
         if (typeof item === 'string' || typeof item === 'number') return true;
         if (typeof item === 'object' && item !== null && item.id) {
@@ -403,30 +355,8 @@ async function fetchBulkJobIds() {
         }
         return false;
     });
-    const finalExpiredRemoved = finalBeforeCleanup - jobIdCache.jobIds.length;
-    if (finalExpiredRemoved > 0) {
-        console.log(`[Fetch] Final cleanup: Removed ${finalExpiredRemoved} expired entries`);
-    }
     
     jobIdCache.totalFetched = jobIdCache.jobIds.length;
-    const keptFromOld = validExistingServers.length;
-    console.log(`[Fetch] Bulk fetch complete!`);
-    console.log(`[Fetch] Total job IDs cached: ${jobIdCache.jobIds.length}/${MAX_JOB_IDS}`);
-    console.log(`[Fetch] Kept from old cache: ${keptFromOld} (removed ${expiredCount} expired)`);
-    console.log(`[Fetch] Fresh servers added: ${totalAdded}`);
-    console.log(`[Fetch] Servers filtered (Full/Private): ${totalFiltered}`);
-    console.log(`[Fetch] Total servers scanned: ${totalScanned}`);
-    console.log(`[Fetch] Pages fetched: ${pagesFetched}`);
-    
-    if (jobIdCache.jobIds.length === 0) {
-        console.log(`[Fetch] ⚠️  WARNING: No servers found with 7/8 or less players after scanning ${totalScanned} servers across ${pagesFetched} pages`);
-        console.log(`[Fetch] All servers appear to be full (8/8). The game may be at capacity.`);
-    } else if (jobIdCache.jobIds.length < MAX_JOB_IDS) {
-        console.log(`[Fetch] ⚠️  Warning: Only cached ${jobIdCache.jobIds.length} job IDs, target was ${MAX_JOB_IDS}`);
-        console.log(`[Fetch] Consider increasing PAGES_TO_FETCH (currently ${PAGES_TO_FETCH}) if you need more servers`);
-    } else {
-        console.log(`[Fetch] ✅ Success: Cache refreshed with ${MAX_JOB_IDS} freshest job IDs!`);
-    }
     
     return {
         total: jobIdCache.jobIds.length,
@@ -437,28 +367,14 @@ async function fetchBulkJobIds() {
 }
 
 async function main() {
-    console.log('='.repeat(60));
-    console.log('Roblox Job ID Bulk Fetcher');
-    console.log('='.repeat(60));
-    
     loadCache();
     
     const result = await fetchBulkJobIds();
     
-    if (saveCache()) {
-        console.log('\n[Success] Cache saved successfully!');
-        console.log(`[Stats] Total job IDs: ${result.total}`);
-        console.log(`[Stats] New job IDs: ${result.added}`);
-        console.log(`[Stats] Servers scanned: ${result.scanned}`);
-        console.log(`[Cache] File location: ${CACHE_FILE}`);
-    } else {
-        console.error('\n[Error] Failed to save cache!');
+    if (!saveCache()) {
+        console.error('[Error] Failed to save cache!');
         process.exit(1);
     }
-    
-    console.log('\n' + '='.repeat(60));
-    console.log('Done! You can now use the cached job IDs in your Lua script.');
-    console.log('='.repeat(60));
 }
 
 if (require.main === module) {
@@ -521,9 +437,6 @@ module.exports = {
                 return false;
             });
             
-            if (beforeCleanup !== jobIdCache.jobIds.length) {
-                console.log(`[Cache] Cleaned ${beforeCleanup - jobIdCache.jobIds.length} expired job IDs`);
-            }
             
             return sorted;
         } catch (error) {
@@ -613,9 +526,6 @@ module.exports = {
                 return false;
             });
             
-            if (beforeCleanup !== jobIdCache.jobIds.length) {
-                console.log(`[Cache] Cleaned ${beforeCleanup - jobIdCache.jobIds.length} expired job IDs from getFreshestServers`);
-            }
             
             return sorted;
         } catch (error) {
