@@ -387,7 +387,7 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
             });
         }
         
-        const limit = parseInt(req.query.limit) || 100;
+        const limit = parseInt(req.query.limit) || 1000;
         const exclude = req.query.exclude ? req.query.exclude.split(',') : [];
         
         try {
@@ -402,7 +402,12 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         
         let jobIds = [];
         try {
-            jobIds = jobIdFetcher.getJobIds();
+            // Use freshest servers if available, otherwise fall back to regular getJobIds
+            if (typeof jobIdFetcher.getFreshestJobIds === 'function') {
+                jobIds = jobIdFetcher.getFreshestJobIds(limit * 2); // Get more to filter
+            } else {
+                jobIds = jobIdFetcher.getJobIds();
+            }
             if (!Array.isArray(jobIds)) {
                 jobIds = [];
             }
@@ -451,7 +456,8 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
             jobIds: result,
             count: result.length,
             totalAvailable: jobIds.length,
-            cacheInfo: jobIdFetcher.getCacheInfo()
+            cacheInfo: jobIdFetcher.getCacheInfo(),
+            message: `Returned ${result.length} of ${jobIds.length} available fresh servers`
         });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
@@ -543,11 +549,12 @@ if (jobIdFetcher) {
             jobIdFetcher.fetchBulkJobIds()
                 .then(result => {
                     jobIdFetcher.saveCache();
-                    console.log(`[Servers] Fetched ${result.total} servers`);
+                    console.log(`[Servers] Refreshed ${result.total} fresh servers`);
                 })
                 .catch(error => {
+                    console.error('[Servers] Auto-refresh error:', error);
                 });
-        }, 10 * 60 * 1000);
+        }, 5 * 60 * 1000);
     } catch (error) {
     }
 }
