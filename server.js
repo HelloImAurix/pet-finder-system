@@ -52,6 +52,7 @@ app.use((req, res, next) => {
 // This should be super fast - no async operations
 app.get('/health', (req, res) => {
     // Respond immediately without any async operations
+    console.log('[Health] Health check requested from:', req.ip || 'unknown');
     const cacheInfo = jobIdFetcher ? (() => {
         try {
             return jobIdFetcher.getCacheInfo();
@@ -567,11 +568,14 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
     // CRITICAL: This endpoint must respond quickly - never block
     // Use try-catch to ensure we always send a response
     
+    console.log('[API] /api/job-ids requested - limit:', req.query.limit, 'exclude:', req.query.exclude ? 'yes' : 'no');
+    
     try {
         // CRITICAL: Respond immediately - never block on fetching
         // Always return cached data if available, fetch in background if needed
         
         if (!jobIdFetcher) {
+            console.log('[API] /api/job-ids - jobIdFetcher not available');
             return res.json({ 
                 success: true,
                 jobIds: [],
@@ -603,11 +607,14 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         
         const hasServers = cacheInfo && cacheInfo.count > 0;
         
+        console.log('[API] /api/job-ids - Cache info:', JSON.stringify(cacheInfo));
+        
         // Get servers with full metadata if available (expired servers are automatically filtered)
         let serversWithMetadata = [];
         try {
             if (typeof jobIdFetcher.getFreshestServers === 'function') {
                 serversWithMetadata = jobIdFetcher.getFreshestServers(limit * 2);
+                console.log('[API] /api/job-ids - Got', serversWithMetadata.length, 'servers from getFreshestServers');
             } else if (typeof jobIdFetcher.getFreshestJobIds === 'function') {
                 // Fallback: Get job IDs (expired ones are filtered automatically)
                 const jobIds = jobIdFetcher.getFreshestJobIds(limit * 2);
@@ -643,9 +650,12 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
             const limited = serversWithMetadata.slice(0, limit);
             const jobIdsOnly = limited.map(s => s.id);
             
+            console.log('[API] /api/job-ids - Returning', limited.length, 'servers (total available:', totalAvailable, ')');
+            
             // Trigger background refresh if cache is low or stale, but don't wait for it
             // Use setImmediate to ensure response is sent first
             if (!isFetching && (cacheInfo.count < 100 || (cacheInfo.lastUpdated && (Date.now() - new Date(cacheInfo.lastUpdated).getTime()) > 300000))) {
+                console.log('[API] /api/job-ids - Triggering background refresh');
                 // Defer fetch to next tick so response can be sent first
                 setImmediate(() => {
                     if (isFetching) return; // Double-check
@@ -678,6 +688,7 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         
         // No servers available - trigger background fetch if not already fetching
         if (!hasServers && !isFetching) {
+            console.log('[API] /api/job-ids - No servers in cache, triggering background fetch');
             // Defer fetch to next tick so response can be sent first
             setImmediate(() => {
                 if (isFetching) return; // Double-check
@@ -698,6 +709,7 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         }
         
         // Return empty response immediately (don't wait for fetch)
+        console.log('[API] /api/job-ids - Returning empty response (isFetching:', isFetching, ')');
         return res.json({
             success: true,
             jobIds: [],
@@ -710,6 +722,7 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         });
     } catch (error) {
         console.error('[Servers] Error in /api/job-ids:', error);
+        console.error('[Servers] Stack:', error.stack);
         res.status(500).json({ 
             success: false, 
             error: error.message,
@@ -871,12 +884,35 @@ setInterval(() => {
 
 cleanupOldFinds();
 
+// Error handling for uncaught exceptions
+process.on('uncaughtException', (error) => {
+    console.error('[Server] ❌ Uncaught Exception:', error);
+    console.error('[Server] Stack:', error.stack);
+    // Don't exit - let the server try to continue
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('[Server] ❌ Unhandled Rejection at:', promise);
+    console.error('[Server] Reason:', reason);
+    // Don't exit - let the server try to continue
+});
+
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[Server] Pet Finder API Server running on port ${PORT}`);
+    console.log('='.repeat(60));
+    console.log(`[Server] ✅ Pet Finder API Server running on port ${PORT}`);
     console.log(`[Server] Health check: http://localhost:${PORT}/health`);
+    console.log(`[Server] Job IDs endpoint: http://localhost:${PORT}/api/job-ids`);
     if (jobIdFetcher) {
         console.log(`[Server] Job ID caching: ENABLED`);
+        try {
+            jobIdFetcher.loadCache();
+            const cacheInfo = jobIdFetcher.getCacheInfo();
+            console.log(`[Server] Cache status: ${cacheInfo.count} servers cached`);
+        } catch (e) {
+            console.log(`[Server] Cache status: Error loading cache - ${e.message}`);
+        }
     } else {
         console.log(`[Server] Job ID caching: DISABLED (module not available)`);
     }
+    console.log('='.repeat(60));
 });
