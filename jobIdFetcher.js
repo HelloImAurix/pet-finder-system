@@ -123,7 +123,6 @@ function makeRequest(url) {
             });
         });
         
-        // Add timeout (20 seconds - reduced to avoid Railway timeouts)
         request.setTimeout(20000, () => {
             request.destroy();
             reject(new Error('Request timeout after 20 seconds'));
