@@ -5,7 +5,7 @@ const path = require('path');
 const PLACE_ID = parseInt(process.env.PLACE_ID, 10) || 109983668079237;
 const CACHE_FILE = path.join(__dirname, 'jobIds_cache.json');
 const MAX_JOB_IDS = parseInt(process.env.MAX_JOB_IDS || '1000', 10);
-const PAGES_TO_FETCH = parseInt(process.env.PAGES_TO_FETCH || '15', 10);
+const PAGES_TO_FETCH = parseInt(process.env.PAGES_TO_FETCH || '100', 10); // Fetch many pages to find servers with 7/8 or less
 const DELAY_BETWEEN_REQUESTS = parseInt(process.env.DELAY_BETWEEN_REQUESTS || '5000', 10); // Increased to 5 seconds to avoid rate limits
 const MIN_PLAYERS = parseInt(process.env.MIN_PLAYERS || '1', 10);
 const MAX_PLAYERS = parseInt(process.env.MAX_PLAYERS || '6', 10); // Exclude full servers (7+ players, max is usually 6)
@@ -120,7 +120,7 @@ function makeRequest(url) {
 }
 
 async function fetchPage(cursor = null, retryCount = 0) {
-    let url = `https://games.roblox.com/v1/games/${PLACE_ID}/servers/Public?sortOrder=Desc&limit=100`;
+    let url = `https://games.roblox.com/v1/games/${PLACE_ID}/servers/Public?sortOrder=Desc&limit=100&excludeFullGames=true`;
     if (cursor) {
         url += `&cursor=${cursor}`;
     }
@@ -150,9 +150,10 @@ async function fetchBulkJobIds() {
     console.log(`[Fetch] Starting bulk fetch for place ID: ${PLACE_ID}`);
     console.log(`[Fetch] Target: ${MAX_JOB_IDS} FRESHEST job IDs, fetching up to ${PAGES_TO_FETCH} pages`);
     console.log(`[Fetch] Sort Order: Desc (newest servers first)`);
-    console.log(`[Fetch] Filtering: Only servers with ${MIN_PLAYERS}+ players and not full (players < maxPlayers)`);
+    console.log(`[Fetch] Using excludeFullGames=true parameter to exclude full servers at API level`);
+    console.log(`[Fetch] Filtering: Only caching servers with 7/8 or less players (players < maxPlayers)`);
     console.log(`[Fetch] Filtering: Excluding private servers (VIP check removed - public list only)`);
-    console.log(`[Fetch] This will refresh the entire cache with the freshest servers`);
+    console.log(`[Fetch] Only servers with available slots (7/8 or less) will be cached`);
     
     jobIdCache.jobIds = [];
     const existingJobIds = new Set();
@@ -162,6 +163,8 @@ async function fetchBulkJobIds() {
     let totalScanned = 0;
     let totalFiltered = 0;
     
+    // Stop fetching if we have enough servers OR if we've checked enough pages
+    // Note: Roblox API doesn't support filtering by player count, so we fetch all and filter client-side
     while (pagesFetched < PAGES_TO_FETCH && jobIdCache.jobIds.length < MAX_JOB_IDS) {
         if (pagesFetched > 0) {
             await new Promise(resolve => setTimeout(resolve, DELAY_BETWEEN_REQUESTS));
@@ -184,36 +187,19 @@ async function fetchBulkJobIds() {
         }
         
         if (!data || !data.data || data.data.length === 0) {
-            console.log(`[Fetch] No more data available`);
+            console.log(`[Fetch] No more data available from API`);
             break;
         }
         
         let pageAdded = 0;
         let pageFiltered = 0;
         let filterStats = { full: 0, private: 0, invalid: 0, duplicate: 0, tooMany: 0, lowPlayers: 0 };
-        let sampleServers = []; // Store first 5 servers for debugging
         
         for (const server of data.data) {
             totalScanned++;
             const jobId = server.id;
             const players = server.playing || 0;
             const maxPlayers = server.maxPlayers || 6;
-            
-            // Debug: Store sample of first few servers from first page
-            // Note: pagesFetched is 0 for first page, 1 for second page, etc.
-            if (pagesFetched === 0 && totalScanned <= 5) {
-                sampleServers.push({ 
-                    jobId, 
-                    players, 
-                    maxPlayers, 
-                    private: (server.accessCode !== null && server.accessCode !== undefined) ||
-                            (server.PrivateServerId !== null && server.PrivateServerId !== undefined) ||
-                            (server.privateServerId !== null && server.privateServerId !== undefined),
-                    isFull: players >= maxPlayers
-                });
-            }
-            
-            // Note: VIP check removed - we're fetching from public servers list, so VIP servers shouldn't appear anyway
             
             // Filter private servers - check multiple indicators to catch all types:
             // - accessCode: Private servers that require an access code to join
@@ -223,7 +209,6 @@ async function fetchBulkJobIds() {
                                    (server.PrivateServerId !== null && server.PrivateServerId !== undefined) ||
                                    (server.privateServerId !== null && server.privateServerId !== undefined);
             
-            // Track why servers are filtered (for debugging)
             if (!jobId) {
                 filterStats.invalid++;
                 pageFiltered++;
@@ -239,22 +224,21 @@ async function fetchBulkJobIds() {
                 pageFiltered++;
                 continue;
             }
-            if (players < MIN_PLAYERS) {
+            // Allow empty servers (players === 0) - they might have slots available
+            // Only filter if players < MIN_PLAYERS AND players > 0 (empty servers are allowed)
+            if (players > 0 && players < MIN_PLAYERS) {
                 filterStats.lowPlayers++;
                 pageFiltered++;
                 continue;
             }
-            // Exclude full servers: players >= maxPlayers means server is full
-            // Debug: Log first few full servers to see what's happening
+            // Exclude full servers: Only allow servers with players < maxPlayers (7/8 or less)
+            // This means: 7/8 = allowed, 8/8 = filtered out
             if (players >= maxPlayers) {
-                if (pagesFetched === 0 && totalScanned <= 3 && filterStats.full < 3) {
-                    console.log(`[Fetch] DEBUG - Full server example: JobId: ${jobId?.toString().substring(0, 12)}..., Players: ${players}, MaxPlayers: ${maxPlayers}, IsFull: ${players >= maxPlayers}`);
-                }
                 filterStats.full++;
                 pageFiltered++;
                 continue;
             }
-            // VIP check removed - public servers list shouldn't contain VIP servers
+            
             if (isPrivateServer) {
                 filterStats.private++;
                 pageFiltered++;
@@ -262,11 +246,12 @@ async function fetchBulkJobIds() {
             }
             
             // Server passed all filters
-            // Note: We check players < maxPlayers (not <= MAX_PLAYERS) to exclude full servers
+            // Only allow servers with players < maxPlayers (7/8 or less, not 8/8)
+            // Allow empty servers (players === 0) as they have slots available
             // VIP check removed - public servers list shouldn't contain VIP servers
             if (jobId && 
-                players >= MIN_PLAYERS && 
-                players < maxPlayers &&  // Exclude full servers (players < maxPlayers)
+                (players === 0 || players >= MIN_PLAYERS) &&  // Allow empty servers or servers with min players
+                players < maxPlayers &&  // Only allow 7/8 or less (players < maxPlayers means 7 < 8, not 8 < 8)
                 !isPrivateServer && 
                 !existingJobIds.has(jobId) && 
                 jobIdCache.jobIds.length < MAX_JOB_IDS) {
@@ -296,21 +281,16 @@ async function fetchBulkJobIds() {
         if (filterStats.tooMany > 0) filterDetails.push(`${filterStats.tooMany} cache full`);
         
         const filterSummary = filterDetails.length > 0 ? filterDetails.join(', ') : 'none';
-        console.log(`[Fetch] Page ${pagesFetched}: Added ${pageAdded} new job IDs, Filtered ${pageFiltered} (${filterSummary}) (Total: ${jobIdCache.jobIds.length}/${MAX_JOB_IDS}, Scanned: ${totalScanned})`);
+        console.log(`[Fetch] Page ${pagesFetched}: Added ${pageAdded} new job IDs (7/8 or less players), Filtered ${pageFiltered} (${filterSummary}) (Total: ${jobIdCache.jobIds.length}/${MAX_JOB_IDS}, Scanned: ${totalScanned})`);
         
-        // Debug: Log sample servers from first page
-        // pagesFetched is incremented above, so after first page it will be 1
-        if (pagesFetched === 1 && sampleServers.length > 0) {
-            console.log(`[Fetch] DEBUG - Sample servers (first ${sampleServers.length}):`);
-            sampleServers.forEach((s, i) => {
-                const jobIdShort = s.jobId ? s.jobId.toString().substring(0, 12) + '...' : 'null';
-                console.log(`[Fetch]   ${i+1}. JobId: ${jobIdShort}, Players: ${s.players}/${s.maxPlayers}, Full: ${s.isFull ? 'YES' : 'NO'}, Private: ${s.private ? 'YES' : 'NO'}`);
-            });
+        // Stop early if we have enough servers with 7/8 or less players
+        if (jobIdCache.jobIds.length >= MAX_JOB_IDS) {
+            console.log(`[Fetch] ✅ Reached target of ${MAX_JOB_IDS} servers with 7/8 or less players, stopping fetch early`);
+            break;
         }
         
         // Reset filter stats for next page
         filterStats = { full: 0, private: 0, invalid: 0, duplicate: 0, tooMany: 0, lowPlayers: 0 };
-        sampleServers = [];
         
         cursor = data.nextPageCursor;
         if (!cursor) {
@@ -325,11 +305,17 @@ async function fetchBulkJobIds() {
     console.log(`[Fetch] Fresh servers added: ${totalAdded}`);
     console.log(`[Fetch] Servers filtered (Full/Private): ${totalFiltered}`);
     console.log(`[Fetch] Total servers scanned: ${totalScanned}`);
+    console.log(`[Fetch] Pages fetched: ${pagesFetched}`);
     
-    if (jobIdCache.jobIds.length < MAX_JOB_IDS) {
-        console.log(`[Fetch] Warning: Only cached ${jobIdCache.jobIds.length} job IDs, target was ${MAX_JOB_IDS}`);
+    if (jobIdCache.jobIds.length === 0) {
+        console.log(`[Fetch] ⚠️  WARNING: No servers found with 7/8 or less players after scanning ${totalScanned} servers across ${pagesFetched} pages`);
+        console.log(`[Fetch] All servers appear to be full (8/8). The game may be at capacity.`);
+        console.log(`[Fetch] Note: Roblox API doesn't support filtering by player count - we must fetch and filter client-side`);
+    } else if (jobIdCache.jobIds.length < MAX_JOB_IDS) {
+        console.log(`[Fetch] ⚠️  Warning: Only cached ${jobIdCache.jobIds.length} job IDs, target was ${MAX_JOB_IDS}`);
+        console.log(`[Fetch] Consider increasing PAGES_TO_FETCH (currently ${PAGES_TO_FETCH}) if you need more servers`);
     } else {
-        console.log(`[Fetch] Success: Cached full ${MAX_JOB_IDS} job IDs!`);
+        console.log(`[Fetch] ✅ Success: Cached full ${MAX_JOB_IDS} job IDs!`);
     }
     
     return {
