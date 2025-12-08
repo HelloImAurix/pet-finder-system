@@ -192,6 +192,9 @@ async function fetchBulkJobIds() {
     // Stop fetching if we have enough servers OR if we've checked enough pages
     // Note: Roblox API doesn't support filtering by player count, so we fetch all and filter client-side
     while (pagesFetched < PAGES_TO_FETCH && jobIdCache.jobIds.length < MAX_JOB_IDS) {
+        // Yield to event loop every iteration to keep server responsive
+        await new Promise(resolve => setImmediate(resolve));
+        
         if (pagesFetched > 0) {
             await new Promise(resolve => setTimeout(resolve, DELAY_BETWEEN_REQUESTS));
         }
@@ -313,19 +316,25 @@ async function fetchBulkJobIds() {
         // Use async write to avoid blocking the fetch process
         const currentCount = jobIdCache.jobIds.length;
         if (currentCount - lastSaveCount >= 100) {
-            // Save asynchronously to avoid blocking
-            setImmediate(() => {
-                try {
-                    jobIdCache.lastUpdated = new Date().toISOString();
-                    jobIdCache.totalFetched = currentCount;
-                    fs.writeFileSync(CACHE_FILE, JSON.stringify(jobIdCache, null, 2));
-                    console.log(`[Fetch] 💾 Incremental save: Saved ${currentCount} servers to cache (available for API)`);
-                } catch (saveError) {
-                    console.warn(`[Fetch] Failed to save cache incrementally: ${saveError.message}`);
-                }
+            // Save asynchronously to avoid blocking - but wait for it to complete
+            await new Promise((resolve) => {
+                setImmediate(() => {
+                    try {
+                        jobIdCache.lastUpdated = new Date().toISOString();
+                        jobIdCache.totalFetched = currentCount;
+                        fs.writeFileSync(CACHE_FILE, JSON.stringify(jobIdCache, null, 2));
+                        console.log(`[Fetch] 💾 Incremental save: Saved ${currentCount} servers to cache (available for API)`);
+                    } catch (saveError) {
+                        console.warn(`[Fetch] Failed to save cache incrementally: ${saveError.message}`);
+                    }
+                    resolve();
+                });
             });
             lastSaveCount = currentCount;
         }
+        
+        // Yield to event loop after processing each page to keep server responsive
+        await new Promise(resolve => setImmediate(resolve));
         
         // Stop early if we have enough servers with 7/8 or less players
         if (jobIdCache.jobIds.length >= MAX_JOB_IDS) {
