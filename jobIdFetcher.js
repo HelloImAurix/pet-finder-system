@@ -9,6 +9,7 @@ const PAGES_TO_FETCH = parseInt(process.env.PAGES_TO_FETCH || '100', 10); // Fet
 const DELAY_BETWEEN_REQUESTS = parseInt(process.env.DELAY_BETWEEN_REQUESTS || '5000', 10); // Increased to 5 seconds to avoid rate limits
 const MIN_PLAYERS = parseInt(process.env.MIN_PLAYERS || '1', 10);
 const MAX_PLAYERS = parseInt(process.env.MAX_PLAYERS || '6', 10); // Exclude full servers (7+ players, max is usually 6)
+const JOB_ID_MAX_AGE_MS = parseInt(process.env.JOB_ID_MAX_AGE_MS || '600000', 10); // 10 minutes - Roblox servers expire after inactivity
 let jobIdCache = {
     jobIds: [],
     lastUpdated: null,
@@ -53,21 +54,33 @@ function loadCache() {
 }
 
 function cleanCache() {
-    // Remove any invalid entries and ensure we only have valid job IDs
+    // Remove any invalid entries and expired job IDs
     // Handle both old format (strings) and new format (objects with timestamps)
     if (Array.isArray(jobIdCache.jobIds)) {
         const originalLength = jobIdCache.jobIds.length;
+        const now = Date.now();
+        const maxAge = JOB_ID_MAX_AGE_MS;
+        
         jobIdCache.jobIds = jobIdCache.jobIds.filter(item => {
+            // Check validity
             if (typeof item === 'string' || typeof item === 'number') {
+                // Old format - keep for backward compatibility, but consider them potentially stale
                 return item !== null && item !== undefined && item !== '';
             }
             if (typeof item === 'object' && item !== null) {
-                return item.id !== null && item.id !== undefined && item.id !== '';
+                // New format - check validity and expiration
+                if (!item.id || item.id === null || item.id === undefined || item.id === '') {
+                    return false;
+                }
+                // Check if expired
+                const age = now - (item.timestamp || 0);
+                return age < maxAge; // Only keep if less than max age
             }
             return false;
         });
+        
         if (originalLength !== jobIdCache.jobIds.length) {
-            console.log(`[Cache] Cleaned ${originalLength - jobIdCache.jobIds.length} invalid entries from cache`);
+            console.log(`[Cache] Cleaned ${originalLength - jobIdCache.jobIds.length} invalid/expired entries from cache`);
         }
     }
 }
@@ -400,11 +413,22 @@ module.exports = {
     getFreshestJobIds: (limit = 1000) => {
         try {
             const ids = jobIdCache.jobIds || [];
-            // Sort by timestamp (newest first), then take limit
+            const now = Date.now();
+            const maxAge = JOB_ID_MAX_AGE_MS;
+            
+            // Filter out expired job IDs and sort by timestamp (newest first)
             const sorted = ids
                 .filter(item => {
-                    if (typeof item === 'string' || typeof item === 'number') return true;
-                    if (typeof item === 'object' && item !== null && item.id) return true;
+                    // Check if item is valid
+                    if (typeof item === 'string' || typeof item === 'number') {
+                        // Old format - assume it's still valid (no timestamp)
+                        return true;
+                    }
+                    if (typeof item === 'object' && item !== null && item.id) {
+                        // New format - check if expired
+                        const age = now - (item.timestamp || 0);
+                        return age < maxAge; // Only return if less than max age
+                    }
                     return false;
                 })
                 .sort((a, b) => {
@@ -414,6 +438,22 @@ module.exports = {
                 })
                 .slice(0, limit)
                 .map(item => typeof item === 'object' ? item.id : item);
+            
+            // Clean up expired entries from cache
+            const beforeCleanup = jobIdCache.jobIds.length;
+            jobIdCache.jobIds = jobIdCache.jobIds.filter(item => {
+                if (typeof item === 'string' || typeof item === 'number') return true;
+                if (typeof item === 'object' && item !== null) {
+                    const age = now - (item.timestamp || 0);
+                    return age < maxAge;
+                }
+                return false;
+            });
+            
+            if (beforeCleanup !== jobIdCache.jobIds.length) {
+                console.log(`[Cache] Cleaned ${beforeCleanup - jobIdCache.jobIds.length} expired job IDs`);
+            }
+            
             return sorted;
         } catch (error) {
             console.error('[Cache] Error getting freshest job IDs:', error.message);
@@ -423,11 +463,22 @@ module.exports = {
     getFreshestServers: (limit = 1000) => {
         try {
             const ids = jobIdCache.jobIds || [];
-            // Return full server objects with metadata, sorted by timestamp (newest first)
+            const now = Date.now();
+            const maxAge = JOB_ID_MAX_AGE_MS;
+            
+            // Filter out expired job IDs and return full server objects with metadata
             const sorted = ids
                 .filter(item => {
-                    if (typeof item === 'string' || typeof item === 'number') return true;
-                    if (typeof item === 'object' && item !== null && item.id) return true;
+                    // Check if item is valid and not expired
+                    if (typeof item === 'string' || typeof item === 'number') {
+                        // Old format - assume it's still valid (no timestamp)
+                        return true;
+                    }
+                    if (typeof item === 'object' && item !== null && item.id) {
+                        // New format - check if expired
+                        const age = now - (item.timestamp || 0);
+                        return age < maxAge; // Only return if less than max age
+                    }
                     return false;
                 })
                 .sort((a, b) => {
@@ -453,6 +504,22 @@ module.exports = {
                         };
                     }
                 });
+            
+            // Clean up expired entries from cache
+            const beforeCleanup = jobIdCache.jobIds.length;
+            jobIdCache.jobIds = jobIdCache.jobIds.filter(item => {
+                if (typeof item === 'string' || typeof item === 'number') return true;
+                if (typeof item === 'object' && item !== null) {
+                    const age = now - (item.timestamp || 0);
+                    return age < maxAge;
+                }
+                return false;
+            });
+            
+            if (beforeCleanup !== jobIdCache.jobIds.length) {
+                console.log(`[Cache] Cleaned ${beforeCleanup - jobIdCache.jobIds.length} expired job IDs from getFreshestServers`);
+            }
+            
             return sorted;
         } catch (error) {
             console.error('[Cache] Error getting freshest servers:', error.message);
