@@ -416,12 +416,16 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         }
         
         if (jobIds.length === 0) {
+            console.log('[Servers] Cache is empty, triggering immediate fetch...');
             jobIdFetcher.fetchBulkJobIds()
                 .then(result => {
                     jobIdFetcher.saveCache();
-                    console.log(`[Servers] Fetched ${result.total} servers`);
+                    console.log(`[Servers] ✅ Fetched ${result.total} servers in background`);
+                    console.log(`[Servers] Added: ${result.added}, Filtered: ${result.filtered}, Scanned: ${result.scanned}`);
                 })
                 .catch(fetchError => {
+                    console.error('[Servers] ❌ Background fetch error:', fetchError.message);
+                    console.error('[Servers] Stack:', fetchError.stack);
                 });
             
             return res.json({
@@ -532,31 +536,61 @@ app.get('/', (req, res) => {
 
 if (jobIdFetcher) {
     try {
+        console.log('[Servers] Loading cache...');
         jobIdFetcher.loadCache();
         const cacheInfo = jobIdFetcher.getCacheInfo();
+        console.log(`[Servers] Cache loaded: ${cacheInfo.count} servers`);
         
+        // Always fetch on startup if cache is empty or low
         if (cacheInfo.count < 1000) {
-            jobIdFetcher.fetchBulkJobIds()
-                .then(result => {
+            console.log(`[Servers] Cache has ${cacheInfo.count} servers, fetching fresh servers...`);
+            // Use async IIFE to wait for initial fetch
+            (async () => {
+                try {
+                    const result = await jobIdFetcher.fetchBulkJobIds();
                     jobIdFetcher.saveCache();
-                    console.log(`[Servers] Fetched ${result.total} servers`);
-                })
-                .catch(error => {
-                });
+                    console.log(`[Servers] ✅ Fetched ${result.total} servers successfully`);
+                    console.log(`[Servers] Added: ${result.added}, Filtered: ${result.filtered}, Scanned: ${result.scanned}`);
+                } catch (error) {
+                    console.error('[Servers] ❌ Initial fetch error:', error.message);
+                    console.error('[Servers] Stack:', error.stack);
+                    // Retry after 10 seconds
+                    setTimeout(async () => {
+                        try {
+                            console.log('[Servers] Retrying fetch after error...');
+                            const result = await jobIdFetcher.fetchBulkJobIds();
+                            jobIdFetcher.saveCache();
+                            console.log(`[Servers] ✅ Retry successful: ${result.total} servers`);
+                        } catch (retryError) {
+                            console.error('[Servers] ❌ Retry failed:', retryError.message);
+                        }
+                    }, 10000);
+                }
+            })();
+        } else {
+            console.log(`[Servers] Cache has ${cacheInfo.count} servers, skipping initial fetch`);
         }
         
+        // Auto-refresh every 5 minutes
         setInterval(() => {
+            console.log('[Servers] Auto-refreshing cache...');
             jobIdFetcher.fetchBulkJobIds()
                 .then(result => {
                     jobIdFetcher.saveCache();
-                    console.log(`[Servers] Refreshed ${result.total} fresh servers`);
+                    console.log(`[Servers] ✅ Refreshed ${result.total} fresh servers`);
+                    console.log(`[Servers] Added: ${result.added}, Filtered: ${result.filtered}, Scanned: ${result.scanned}`);
                 })
                 .catch(error => {
-                    console.error('[Servers] Auto-refresh error:', error);
+                    console.error('[Servers] ❌ Auto-refresh error:', error.message);
+                    console.error('[Servers] Stack:', error.stack);
                 });
         }, 5 * 60 * 1000);
     } catch (error) {
+        console.error('[Servers] ❌ Initialization error:', error.message);
+        console.error('[Servers] Stack:', error.stack);
     }
+} else {
+    console.warn('[Servers] ⚠️ jobIdFetcher module not available');
 }
 
 setInterval(() => {
