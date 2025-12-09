@@ -444,15 +444,24 @@ module.exports = {
             return [];
         }
     },
-    getFreshestServers: (limit = 2000) => {
+    getFreshestServers: (limit = 2000, excludeIds = []) => {
         try {
             const ids = jobIdCache.jobIds || [];
             const now = Date.now();
             const maxAge = JOB_ID_MAX_AGE_MS;
+            const excludeSet = excludeIds.length > 0 ? new Set(excludeIds.map(id => String(id).trim())) : new Set();
             
             const valid = ids.filter(item => {
-                if (typeof item === 'string' || typeof item === 'number') return true;
+                let itemId;
+                if (typeof item === 'string' || typeof item === 'number') {
+                    itemId = String(item).trim();
+                    if (excludeSet.has(itemId)) return false;
+                    return true;
+                }
                 if (typeof item !== 'object' || !item || !item.id) return false;
+                
+                itemId = String(item.id).trim();
+                if (excludeSet.has(itemId)) return false;
                 
                 const age = now - (item.timestamp || 0);
                 if (age >= maxAge) return false;
@@ -571,7 +580,12 @@ module.exports = {
             const removed = beforeCount - jobIdCache.jobIds.length;
             if (removed > 0) {
                 console.log(`[Cache] Removed ${removed} visited server(s) from cache (${visitedSet.size} requested)`);
-                saveCache(false);
+                try {
+                    jobIdCache.lastUpdated = new Date().toISOString();
+                    fs.writeFileSync(CACHE_FILE, JSON.stringify(jobIdCache, null, 2));
+                } catch (error) {
+                    console.error('[Cache] Failed to save after removing visited servers:', error.message);
+                }
             }
             return removed;
         } catch (error) {
