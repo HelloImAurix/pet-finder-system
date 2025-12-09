@@ -521,6 +521,7 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
             const removedCount = jobIdFetcher.removeVisitedServers(excludeList);
             if (removedCount > 0) {
                 console.log(`[API] Removed ${removedCount} visited server(s) from cache`);
+                jobIdFetcher.saveCache(false);
             }
         }
         
