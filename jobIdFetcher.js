@@ -59,6 +59,9 @@ function saveUsedIds() {
 // Load cache from file
 function loadCache() {
     try {
+        // Load used IDs first so we can filter them out
+        loadUsedIds();
+        
         if (fs.existsSync(CACHE_FILE)) {
             const data = fs.readFileSync(CACHE_FILE, 'utf8');
             const parsed = JSON.parse(data);
@@ -66,11 +69,18 @@ function loadCache() {
             if (parsed && parsed.servers && Array.isArray(parsed.servers)) {
                 serverMap.clear();
                 let loaded = 0;
+                let skippedUsed = 0;
                 
                 for (const server of parsed.servers) {
                     if (!server || !server.id) continue;
                     const jobId = String(server.id).trim();
-                    if (!jobId || usedJobIds.has(jobId)) continue;
+                    if (!jobId) continue;
+                    
+                    // Skip if already blacklisted
+                    if (usedJobIds.has(jobId)) {
+                        skippedUsed++;
+                        continue;
+                    }
                     
                     serverMap.set(jobId, {
                         id: jobId,
@@ -86,7 +96,18 @@ function loadCache() {
                     cacheMetadata = { ...cacheMetadata, ...parsed.metadata };
                 }
                 
-                console.log(`[Cache] Loaded ${loaded} servers (skipped ${parsed.servers.length - loaded} used/invalid)`);
+                const skippedTotal = parsed.servers.length - loaded;
+                if (skippedUsed > 0) {
+                    console.log(`[Cache] Loaded ${loaded} servers (skipped ${skippedTotal} used/invalid, ${skippedUsed} blacklisted)`);
+                } else {
+                    console.log(`[Cache] Loaded ${loaded} servers (skipped ${skippedTotal} invalid)`);
+                }
+                
+                // Save cache immediately to remove blacklisted IDs from file
+                if (skippedUsed > 0) {
+                    saveCache(false);
+                }
+                
                 return true;
             }
         }
@@ -183,18 +204,31 @@ function markAsUsed(jobIds) {
     if (!Array.isArray(jobIds) || jobIds.length === 0) return 0;
     
     let added = 0;
+    let removed = 0;
     for (const jobId of jobIds) {
         const id = String(jobId).trim();
-        if (id && !usedJobIds.has(id)) {
+        if (!id) continue;
+        
+        const wasNew = !usedJobIds.has(id);
+        if (wasNew) {
             usedJobIds.add(id);
-            serverMap.delete(id);
             added++;
+        }
+        
+        // Always remove from serverMap, even if already blacklisted
+        if (serverMap.has(id)) {
+            serverMap.delete(id);
+            removed++;
         }
     }
     
-    if (added > 0) {
+    if (added > 0 || removed > 0) {
         saveUsedIds();
-        console.log(`[Cache] Marked ${added} job ID(s) as used (total blacklisted: ${usedJobIds.size})`);
+        if (added > 0) {
+            console.log(`[Cache] Marked ${added} job ID(s) as used (removed ${removed} from cache, total blacklisted: ${usedJobIds.size})`);
+        } else if (removed > 0) {
+            console.log(`[Cache] Removed ${removed} already-blacklisted job ID(s) from cache (total blacklisted: ${usedJobIds.size})`);
+        }
     }
     
     return added;
