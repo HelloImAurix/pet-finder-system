@@ -553,9 +553,16 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
             const excludeSetOriginal = new Set(excludeList.map(id => String(id).trim()));
             const beforeFilter = filtered.length;
             
+            console.log(`[API] Filtering response - Excluded IDs: ${excludeList.join(', ')}`);
+            console.log(`[API] Before filtering: ${filtered.length} servers`);
+            
             // Remove any excluded servers that somehow got through - check both normalized and original
-            const filteredOut = filtered.filter(s => {
-                if (!s || !s.id) return false;
+            const filteredOut = [];
+            const excludedFound = [];
+            
+            for (const s of filtered) {
+                if (!s || !s.id) continue;
+                
                 const serverId = String(s.id).trim();
                 const normalized = serverId.toLowerCase();
                 
@@ -563,19 +570,22 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
                 const isExcluded = excludeSetNormalized.has(normalized) || excludeSetOriginal.has(serverId);
                 
                 if (isExcluded) {
+                    excludedFound.push(serverId);
                     console.error(`[API] CRITICAL: Found excluded job ID in response: ${serverId} (normalized: ${normalized})`);
+                } else {
+                    filteredOut.push(s);
                 }
-                
-                return !isExcluded;
-            });
+            }
             
-            if (filteredOut.length < filtered.length) {
-                const removed = filtered.length - filteredOut.length;
-                console.error(`[API] ERROR: Removed ${removed} excluded job ID(s) from response! This should not happen!`);
+            if (excludedFound.length > 0) {
+                console.error(`[API] ERROR: Removed ${excludedFound.length} excluded job ID(s) from response! This should not happen!`);
                 console.error(`[API] Excluded IDs were: ${excludeList.join(', ')}`);
+                console.error(`[API] Found excluded IDs in response: ${excludedFound.join(', ')}`);
                 filtered = filteredOut;
                 serverIds = filtered.map(s => String(s.id).trim()).filter(id => id.length > 0);
             }
+            
+            console.log(`[API] After filtering: ${filtered.length} servers`);
             
             // Final verification: double-check and log if any excluded IDs are still present
             for (const serverId of serverIds) {
@@ -596,6 +606,21 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         console.log(`[API] /job-ids: Returning ${filtered.length} servers (excluded ${excludeList.length} job IDs from request, ${cacheInfo.usedCount || 0} total blacklisted)`);
         if (serverIds.length > 0) {
             console.log(`[API] Returning job IDs: ${serverIds.slice(0, 5).join(', ')}${serverIds.length > 5 ? '...' : ''}`);
+            
+            // Verify excluded IDs are not in the returned list
+            if (excludeList.length > 0) {
+                for (const excludedId of excludeList) {
+                    const excludedIdStr = String(excludedId).trim();
+                    const excludedIdNormalized = excludedIdStr.toLowerCase();
+                    for (const returnedId of serverIds) {
+                        const returnedIdStr = String(returnedId).trim();
+                        const returnedIdNormalized = returnedIdStr.toLowerCase();
+                        if (returnedIdStr === excludedIdStr || returnedIdNormalized === excludedIdNormalized) {
+                            console.error(`[API] CRITICAL BUG: Excluded ID ${excludedIdStr} is in the returned list as ${returnedIdStr}!`);
+                        }
+                    }
+                }
+            }
         }
         if (excludeList.length > 0) {
             console.log(`[API] Excluded job IDs: ${excludeList.slice(0, 5).join(', ')}${excludeList.length > 5 ? '...' : ''}`);
