@@ -9,7 +9,7 @@ const PAGES_TO_FETCH = parseInt(process.env.PAGES_TO_FETCH || '100', 10);
 const DELAY_BETWEEN_REQUESTS = parseInt(process.env.DELAY_BETWEEN_REQUESTS || '6000', 10);
 const MIN_PLAYERS = parseInt(process.env.MIN_PLAYERS || '1', 10);
 const MAX_PLAYERS = parseInt(process.env.MAX_PLAYERS || '6', 10);
-const JOB_ID_MAX_AGE_MS = parseInt(process.env.JOB_ID_MAX_AGE_MS || '60000', 10);
+const JOB_ID_MAX_AGE_MS = parseInt(process.env.JOB_ID_MAX_AGE_MS || '180000', 10);
 let jobIdCache = {
     jobIds: [],
     lastUpdated: null,
@@ -95,12 +95,12 @@ function cleanCache() {
                 const isAlmostFull = players >= (maxPlayers - 1) && players < maxPlayers;
                 const isNearFull = players >= (maxPlayers - 2) && players < (maxPlayers - 1);
                 
-                if (isAlmostFull && age > 15000) {
+                if (isAlmostFull && age > 60000) {
                     fullCount++;
                     return false;
                 }
                 
-                if (isNearFull && age > 30000) {
+                if (isNearFull && age > 90000) {
                     return false;
                 }
                 
@@ -501,15 +501,15 @@ module.exports = {
                         const isAlmostFull = players >= (maxPlayers - 1) && players < maxPlayers;
                         const isNearFull = players >= (maxPlayers - 2) && players < (maxPlayers - 1);
                         
-                        if (isAlmostFull && age > 15000) {
+                        if (isAlmostFull && age > 60000) {
                             return false;
                         }
                         
-                        if (isNearFull && age > 30000) {
+                        if (isNearFull && age > 90000) {
                             return false;
                         }
                         
-                        if (age > 60000) {
+                        if (age > 180000) {
                             return false;
                         }
                         
