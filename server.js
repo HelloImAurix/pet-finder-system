@@ -527,12 +527,16 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         const excludeSet = new Set(exclude.filter(id => id && id.length > 0));
         
         const filtered = [];
+        const now = Date.now();
         for (const server of servers) {
             if (excludeSet.has(server.id)) continue;
             
             const players = server.players || 0;
             const maxPlayers = server.maxPlayers || 8;
             if (players >= maxPlayers) continue;
+            
+            const serverAge = server.timestamp ? (now - server.timestamp) : 0;
+            if (serverAge > 180000) continue;
             
             if (players < maxPlayers) {
                 filtered.push(server);
@@ -562,9 +566,10 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         
         const cacheAge = cacheInfo.lastUpdated ? (Date.now() - new Date(cacheInfo.lastUpdated).getTime()) : Infinity;
         const shouldRefresh = !isFetching && (
-            cacheInfo.count < 500 || 
-            cacheAge > 120000 ||
-            (cacheInfo.count < 1000 && cacheAge > 60000)
+            cacheInfo.count < 300 || 
+            cacheAge > 60000 ||
+            (cacheInfo.count < 500 && cacheAge > 30000) ||
+            (cacheInfo.count < 1000 && cacheAge > 45000)
         );
         
         if (shouldRefresh) {
@@ -691,24 +696,29 @@ function startServer() {
                             jobIdFetcher.cleanCache();
                             jobIdFetcher.saveCache();
                         }
-                    }, 60 * 1000);
+                    }, 30 * 1000);
                     
                     setInterval(() => {
                         if (isFetching) {
                             return;
                         }
-                        isFetching = true;
-                        jobIdFetcher.fetchBulkJobIds()
-                            .then(result => {
-                                jobIdFetcher.saveCache();
-                                console.log(`[API] Auto-refresh: ${result.total} servers available`);
-                                isFetching = false;
-                            })
-                            .catch(error => {
-                                console.error('[API] Auto-refresh error:', error.message);
-                                isFetching = false;
-                            });
-                    }, 3 * 60 * 1000);
+                        const cacheInfo = jobIdFetcher.getCacheInfo();
+                        const cacheAge = cacheInfo.lastUpdated ? (Date.now() - new Date(cacheInfo.lastUpdated).getTime()) : Infinity;
+                        
+                        if (cacheInfo.count < 500 || cacheAge > 90000) {
+                            isFetching = true;
+                            jobIdFetcher.fetchBulkJobIds()
+                                .then(result => {
+                                    jobIdFetcher.saveCache();
+                                    console.log(`[API] Auto-refresh: ${result.total} servers available`);
+                                    isFetching = false;
+                                })
+                                .catch(error => {
+                                    console.error('[API] Auto-refresh error:', error.message);
+                                    isFetching = false;
+                                });
+                        }
+                    }, 90 * 1000);
                 });
             }
         });
