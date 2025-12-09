@@ -514,6 +514,13 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         const limit = parseInt(req.query.limit) || 1000;
         const exclude = req.query.exclude ? req.query.exclude.split(',') : [];
         
+        if (exclude.length > 0) {
+            const removedCount = jobIdFetcher.removeVisitedServers(exclude);
+            if (removedCount > 0) {
+                console.log(`[API] Removed ${removedCount} visited server(s) from cache before fetching`);
+            }
+        }
+        
         const cacheInfo = jobIdFetcher.getCacheInfo();
         
         let servers = [];
@@ -525,14 +532,12 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         
         const excludeSet = new Set(exclude.filter(id => id && id.length > 0));
         
-        if (exclude.length > 0) {
-            jobIdFetcher.removeVisitedServers(exclude);
-        }
-        
         const now = Date.now();
         const filtered = servers
             .filter(server => {
-                if (excludeSet.has(server.id)) return false;
+                if (excludeSet.has(server.id)) {
+                    return false;
+                }
                 const players = server.players || 0;
                 const maxPlayers = server.maxPlayers || 8;
                 if (players >= maxPlayers) return false;
@@ -574,6 +579,15 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
             console.log(`[API] Excluded job IDs: ${excludeList.slice(0, 5).join(', ')}${excludeList.length > 5 ? '...' : ''}`);
         }
         
+        res.json({
+            success: true,
+            jobIds: serverIds,
+            servers: filtered,
+            count: filtered.length,
+            totalAvailable: servers.length,
+            cacheInfo: cacheInfo
+        });
+        
         const cacheAge = cacheInfo.lastUpdated ? (Date.now() - new Date(cacheInfo.lastUpdated).getTime()) : Infinity;
         const shouldRefresh = !isFetching && (
             cacheInfo.count < 500 || 
@@ -599,15 +613,6 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
                     });
             });
         }
-        
-        res.json({
-            success: true,
-            jobIds: serverIds,
-            servers: filtered,
-            count: filtered.length,
-            totalAvailable: servers.length,
-            cacheInfo: cacheInfo
-        });
     } catch (error) {
         console.error('[Servers] Error:', error.message);
         res.status(500).json({ success: false, error: error.message });
