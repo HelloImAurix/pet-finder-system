@@ -514,7 +514,6 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         const limit = parseInt(req.query.limit) || 1000;
         const exclude = req.query.exclude ? req.query.exclude.split(',') : [];
         
-        jobIdFetcher.loadCache();
         const cacheInfo = jobIdFetcher.getCacheInfo();
         
         let servers = [];
