@@ -580,12 +580,6 @@ module.exports = {
             const removed = beforeCount - jobIdCache.jobIds.length;
             if (removed > 0) {
                 console.log(`[Cache] Removed ${removed} visited server(s) from cache (${visitedSet.size} requested)`);
-                try {
-                    jobIdCache.lastUpdated = new Date().toISOString();
-                    fs.writeFileSync(CACHE_FILE, JSON.stringify(jobIdCache, null, 2));
-                } catch (error) {
-                    console.error('[Cache] Failed to save after removing visited servers:', error.message);
-                }
             }
             return removed;
         } catch (error) {
