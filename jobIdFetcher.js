@@ -4,9 +4,9 @@ const path = require('path');
 
 const PLACE_ID = parseInt(process.env.PLACE_ID, 10) || 109983668079237;
 const CACHE_FILE = path.join(__dirname, 'jobIds_cache.json');
-const MAX_JOB_IDS = parseInt(process.env.MAX_JOB_IDS || '1000', 10);
-const PAGES_TO_FETCH = parseInt(process.env.PAGES_TO_FETCH || '100', 10);
-const DELAY_BETWEEN_REQUESTS = parseInt(process.env.DELAY_BETWEEN_REQUESTS || '6000', 10);
+const MAX_JOB_IDS = parseInt(process.env.MAX_JOB_IDS || '2000', 10);
+const PAGES_TO_FETCH = parseInt(process.env.PAGES_TO_FETCH || '200', 10);
+const DELAY_BETWEEN_REQUESTS = parseInt(process.env.DELAY_BETWEEN_REQUESTS || '2000', 10);
 const MIN_PLAYERS = parseInt(process.env.MIN_PLAYERS || '1', 10);
 const MAX_PLAYERS = parseInt(process.env.MAX_PLAYERS || '6', 10);
 const JOB_ID_MAX_AGE_MS = parseInt(process.env.JOB_ID_MAX_AGE_MS || '180000', 10);
@@ -236,7 +236,8 @@ async function fetchBulkJobIds() {
         await new Promise(resolve => setImmediate(resolve));
         
         if (pagesFetched > 0) {
-            await new Promise(resolve => setTimeout(resolve, DELAY_BETWEEN_REQUESTS));
+            const delay = pagesFetched % 3 === 0 ? DELAY_BETWEEN_REQUESTS : 1000;
+            await new Promise(resolve => setTimeout(resolve, delay));
         }
         
         let data;
@@ -354,7 +355,7 @@ async function fetchBulkJobIds() {
         
         await new Promise(resolve => setImmediate(resolve));
         
-        if (jobIdCache.jobIds.length >= MAX_JOB_IDS) {
+        if (jobIdCache.jobIds.length >= MAX_JOB_IDS && pagesFetched >= 50) {
             break;
         }
         
@@ -477,7 +478,7 @@ module.exports = {
             return [];
         }
     },
-    getFreshestServers: (limit = 1000) => {
+    getFreshestServers: (limit = 2000) => {
         try {
             const ids = jobIdCache.jobIds || [];
             const now = Date.now();
