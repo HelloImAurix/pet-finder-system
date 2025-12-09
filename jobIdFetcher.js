@@ -189,23 +189,19 @@ async function fetchBulkJobIds() {
     const existingValidIds = new Set();
     
     const validExistingServers = jobIdCache.jobIds.filter(item => {
+        let id;
         if (typeof item === 'string' || typeof item === 'number') {
-            const id = String(item);
-            if (existingValidIds.has(id)) return false;
-            existingValidIds.add(id);
-            return true;
-        }
-        if (typeof item === 'object' && item !== null && item.id) {
+            id = String(item);
+        } else if (typeof item === 'object' && item !== null && item.id) {
             const age = now - (item.timestamp || 0);
-            if (age >= maxAge) {
-                return false;
-            }
-            const id = String(item.id);
-            if (existingValidIds.has(id)) return false;
-            existingValidIds.add(id);
-            return true;
+            if (age >= maxAge) return false;
+            id = String(item.id);
+        } else {
+            return false;
         }
-        return false;
+        if (existingValidIds.has(id)) return false;
+        existingValidIds.add(id);
+        return true;
     });
     
     const expiredCount = beforeCleanup - validExistingServers.length;
@@ -223,8 +219,6 @@ async function fetchBulkJobIds() {
     let lastSaveCount = 0;
     
     while (pagesFetched < PAGES_TO_FETCH && jobIdCache.jobIds.length < MAX_JOB_IDS) {
-        await new Promise(resolve => setImmediate(resolve));
-        
         if (pagesFetched > 0) {
             const delay = pagesFetched % 3 === 0 ? DELAY_BETWEEN_REQUESTS : 1000;
             await new Promise(resolve => setTimeout(resolve, delay));
@@ -243,7 +237,10 @@ async function fetchBulkJobIds() {
         }
         
         if (!data || !data.data || data.data.length === 0) {
-            break;
+            cursor = data && data.nextPageCursor ? data.nextPageCursor : null;
+            if (!cursor) break;
+            pagesFetched++;
+            continue;
         }
         
         let pageAdded = 0;
@@ -260,45 +257,23 @@ async function fetchBulkJobIds() {
                                    (server.PrivateServerId !== null && server.PrivateServerId !== undefined) ||
                                    (server.privateServerId !== null && server.privateServerId !== undefined);
             
-            if (!jobId) {
-                filterStats.invalid++;
-                pageFiltered++;
-                continue;
-            }
-            if (existingJobIds.has(jobId)) {
-                filterStats.duplicate++;
-                pageFiltered++;
-                continue;
-            }
-            if (jobIdCache.jobIds.length >= MAX_JOB_IDS) {
-                filterStats.tooMany++;
-                pageFiltered++;
-                continue;
-            }
-            if (players > 0 && players < MIN_PLAYERS) {
-                filterStats.lowPlayers++;
-                pageFiltered++;
-                continue;
-            }
-            if (players >= maxPlayers) {
-                filterStats.full++;
+            if (!jobId || existingJobIds.has(jobId) || jobIdCache.jobIds.length >= MAX_JOB_IDS) {
+                if (!jobId) filterStats.invalid++;
+                else if (existingJobIds.has(jobId)) filterStats.duplicate++;
+                else filterStats.tooMany++;
                 pageFiltered++;
                 continue;
             }
             
-            if (isPrivateServer) {
-                filterStats.private++;
+            if (players >= maxPlayers || isPrivateServer || (players > 0 && players < MIN_PLAYERS)) {
+                if (players >= maxPlayers) filterStats.full++;
+                else if (isPrivateServer) filterStats.private++;
+                else filterStats.lowPlayers++;
                 pageFiltered++;
                 continue;
             }
             
-            if (jobId && 
-                players < maxPlayers &&
-                players >= 0 &&
-                (players === 0 || players >= MIN_PLAYERS) &&
-                !isPrivateServer && 
-                !existingJobIds.has(jobId) && 
-                jobIdCache.jobIds.length < MAX_JOB_IDS) {
+            if (players < maxPlayers && players >= 0 && (players === 0 || players >= MIN_PLAYERS) && !isPrivateServer) {
                 const isAlmostFull = players >= (maxPlayers - 1) && players < maxPlayers;
                 const isNearFull = players >= (maxPlayers - 2) && players < (maxPlayers - 1);
                 const priority = isAlmostFull ? 3 : (isNearFull ? 2 : (players > 0 ? 1 : 0));
@@ -313,9 +288,6 @@ async function fetchBulkJobIds() {
                 existingJobIds.add(jobId);
                 pageAdded++;
                 totalAdded++;
-            } else {
-                pageFiltered++;
-                totalFiltered++;
             }
         }
         
@@ -349,47 +321,38 @@ async function fetchBulkJobIds() {
             lastSaveCount = currentCount;
         }
         
-        await new Promise(resolve => setImmediate(resolve));
+        cursor = data.nextPageCursor;
+        
+        if (!cursor) {
+            break;
+        }
         
         if (jobIdCache.jobIds.length >= MAX_JOB_IDS && pagesFetched >= 50) {
             break;
         }
         
         filterStats = { full: 0, private: 0, invalid: 0, duplicate: 0, tooMany: 0, lowPlayers: 0 };
-        
-        cursor = data.nextPageCursor;
-        if (!cursor) {
-            break;
-        }
     }
     
-    const beforeSort = jobIdCache.jobIds.length;
     jobIdCache.jobIds.sort((a, b) => {
-        const aPriority = typeof a === 'object' && a !== null ? (a.priority || 0) : 0;
-        const bPriority = typeof b === 'object' && b !== null ? (b.priority || 0) : 0;
+        const aObj = typeof a === 'object' && a !== null ? a : null;
+        const bObj = typeof b === 'object' && b !== null ? b : null;
+        const aPriority = aObj ? (aObj.priority || 0) : 0;
+        const bPriority = bObj ? (bObj.priority || 0) : 0;
         if (aPriority !== bPriority) return bPriority - aPriority;
         
-        const aPlayers = typeof a === 'object' && a !== null ? (a.players || 0) : 0;
-        const bPlayers = typeof b === 'object' && b !== null ? (b.players || 0) : 0;
+        const aPlayers = aObj ? (aObj.players || 0) : 0;
+        const bPlayers = bObj ? (bObj.players || 0) : 0;
         if (aPlayers !== bPlayers) return bPlayers - aPlayers;
         
-        const tsA = typeof a === 'object' && a !== null ? (a.timestamp || 0) : Date.now();
-        const tsB = typeof b === 'object' && b !== null ? (b.timestamp || 0) : Date.now();
+        const tsA = aObj ? (aObj.timestamp || 0) : Date.now();
+        const tsB = bObj ? (bObj.timestamp || 0) : Date.now();
         return tsB - tsA;
     });
     
     if (jobIdCache.jobIds.length > MAX_JOB_IDS) {
         jobIdCache.jobIds = jobIdCache.jobIds.slice(0, MAX_JOB_IDS);
     }
-    
-    jobIdCache.jobIds = jobIdCache.jobIds.filter(item => {
-        if (typeof item === 'string' || typeof item === 'number') return true;
-        if (typeof item === 'object' && item !== null && item.id) {
-            const age = Date.now() - (item.timestamp || 0);
-            return age < maxAge;
-        }
-        return false;
-    });
     
     jobIdCache.totalFetched = jobIdCache.jobIds.length;
     
@@ -488,52 +451,38 @@ module.exports = {
             const now = Date.now();
             const maxAge = JOB_ID_MAX_AGE_MS;
             
-            const sorted = ids
-                .filter(item => {
-                    if (typeof item === 'string' || typeof item === 'number') {
-                        return true;
-                    }
-                    if (typeof item === 'object' && item !== null && item.id) {
-                        const age = now - (item.timestamp || 0);
-                        if (age >= maxAge) return false;
-                        
-                        const players = item.players || 0;
-                        const maxPlayers = item.maxPlayers || 8;
-                        if (players >= maxPlayers) return false;
-                        
-                        if (players < 0 || players > maxPlayers) return false;
-                        
-                        const isAlmostFull = players >= (maxPlayers - 1) && players < maxPlayers;
-                        const isNearFull = players >= (maxPlayers - 2) && players < (maxPlayers - 1);
-                        
-                        if (isAlmostFull && age > 60000) {
-                            return false;
-                        }
-                        
-                        if (isNearFull && age > 90000) {
-                            return false;
-                        }
-                        
-                        if (age > 180000) {
-                            return false;
-                        }
-                        
-                        return true;
-                    }
-                    return false;
-                })
+            const valid = ids.filter(item => {
+                if (typeof item === 'string' || typeof item === 'number') return true;
+                if (typeof item !== 'object' || !item || !item.id) return false;
+                
+                const age = now - (item.timestamp || 0);
+                if (age >= maxAge) return false;
+                
+                const players = item.players || 0;
+                const maxPlayers = item.maxPlayers || 8;
+                if (players >= maxPlayers || players < 0 || players > maxPlayers) return false;
+                
+                const isAlmostFull = players >= (maxPlayers - 1) && players < maxPlayers;
+                const isNearFull = players >= (maxPlayers - 2) && players < (maxPlayers - 1);
+                if (isAlmostFull && age > 60000) return false;
+                if (isNearFull && age > 90000) return false;
+                if (age > 180000) return false;
+                
+                return true;
+            });
+            
+            const sorted = valid
                 .sort((a, b) => {
-                    const aPriority = typeof a === 'object' && a !== null ? (a.priority || 0) : 0;
-                    const bPriority = typeof b === 'object' && b !== null ? (b.priority || 0) : 0;
+                    const aObj = typeof a === 'object' && a !== null ? a : null;
+                    const bObj = typeof b === 'object' && b !== null ? b : null;
+                    const aPriority = aObj ? (aObj.priority || 0) : 0;
+                    const bPriority = bObj ? (bObj.priority || 0) : 0;
                     if (aPriority !== bPriority) return bPriority - aPriority;
                     
-                    const tsA = typeof a === 'object' ? (a.timestamp || 0) : Date.now();
-                    const tsB = typeof b === 'object' ? (b.timestamp || 0) : Date.now();
-                    
-                    const aPlayers = typeof a === 'object' && a !== null ? (a.players || 0) : 0;
-                    const bPlayers = typeof b === 'object' && b !== null ? (b.players || 0) : 0;
-                    const aMaxPlayers = typeof a === 'object' && a !== null ? (a.maxPlayers || 8) : 8;
-                    const bMaxPlayers = typeof b === 'object' && b !== null ? (b.maxPlayers || 8) : 8;
+                    const aPlayers = aObj ? (aObj.players || 0) : 0;
+                    const bPlayers = bObj ? (bObj.players || 0) : 0;
+                    const aMaxPlayers = aObj ? (aObj.maxPlayers || 8) : 8;
+                    const bMaxPlayers = bObj ? (bObj.maxPlayers || 8) : 8;
                     
                     const aAlmostFull = aPlayers >= (aMaxPlayers - 1) && aPlayers < aMaxPlayers;
                     const bAlmostFull = bPlayers >= (bMaxPlayers - 1) && bPlayers < bMaxPlayers;
@@ -544,57 +493,37 @@ module.exports = {
                     if (!aAlmostFull && bAlmostFull) return 1;
                     if (aNearFull && !bNearFull && !bAlmostFull) return -1;
                     if (!aNearFull && bNearFull && !aAlmostFull) return 1;
-                    
                     if (aPlayers !== bPlayers) return bPlayers - aPlayers;
                     
-                    const aAge = now - tsA;
-                    const bAge = now - tsB;
-                    return aAge - bAge;
+                    const tsA = aObj ? (aObj.timestamp || 0) : Date.now();
+                    const tsB = bObj ? (bObj.timestamp || 0) : Date.now();
+                    return (now - tsA) - (now - tsB);
                 })
                 .slice(0, limit)
                 .map(item => {
                     if (typeof item === 'object' && item !== null) {
                         const players = item.players || 0;
                         const maxPlayers = item.maxPlayers || 8;
-                        const isAlmostFull = players >= (maxPlayers - 1) && players < maxPlayers;
-                        const isNearFull = players >= (maxPlayers - 2) && players < (maxPlayers - 1);
                         return {
                             id: item.id.toString(),
                             players: players,
                             maxPlayers: maxPlayers,
                             timestamp: item.timestamp || Date.now(),
-                            isAlmostFull: isAlmostFull,
-                            isNearFull: isNearFull,
-                            priority: item.priority || (isAlmostFull ? 3 : (isNearFull ? 2 : (players > 0 ? 1 : 0)))
-                        };
-                    } else {
-                        return {
-                            id: item.toString(),
-                            players: 0,
-                            maxPlayers: 8,
-                            timestamp: Date.now(),
-                            isAlmostFull: false
+                            isAlmostFull: players >= (maxPlayers - 1) && players < maxPlayers,
+                            isNearFull: players >= (maxPlayers - 2) && players < (maxPlayers - 1),
+                            priority: item.priority || (players >= (maxPlayers - 1) ? 3 : (players >= (maxPlayers - 2) ? 2 : (players > 0 ? 1 : 0)))
                         };
                     }
+                    return {
+                        id: item.toString(),
+                        players: 0,
+                        maxPlayers: 8,
+                        timestamp: Date.now(),
+                        isAlmostFull: false
+                    };
                 });
             
-            const beforeCleanup = jobIdCache.jobIds.length;
-            jobIdCache.jobIds = jobIdCache.jobIds.filter(item => {
-                if (typeof item === 'string' || typeof item === 'number') return true;
-                if (typeof item === 'object' && item !== null) {
-                    const age = now - (item.timestamp || 0);
-                    if (age >= maxAge) return false;
-                    
-                    const players = item.players || 0;
-                    const maxPlayers = item.maxPlayers || 8;
-                    if (players >= maxPlayers) return false;
-                    
-                    return true;
-                }
-                return false;
-            });
-            
-            
+            jobIdCache.jobIds = valid;
             return sorted;
         } catch (error) {
             console.error('[Cache] Error getting freshest servers:', error.message);
