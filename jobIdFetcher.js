@@ -24,14 +24,7 @@ function loadCache() {
             const parsed = JSON.parse(data);
             if (parsed && Array.isArray(parsed.jobIds)) {
                 jobIdCache = parsed;
-                const originalLength = jobIdCache.jobIds.length;
-                cleanCache();
-                const cleaned = originalLength - jobIdCache.jobIds.length;
-                if (cleaned > 0) {
-                    console.log(`[Cache] Loaded ${jobIdCache.jobIds.length} servers (cleaned ${cleaned} invalid/expired)`);
-                } else {
-                    console.log(`[Cache] Loaded ${jobIdCache.jobIds.length} servers`);
-                }
+                console.log(`[Cache] Loaded ${jobIdCache.jobIds.length} servers`);
                 return true;
             } else {
                 jobIdCache = {
@@ -75,7 +68,12 @@ function cleanCache() {
                     invalidCount++;
                     return false;
                 }
-                const age = now - (item.timestamp || 0);
+                const timestamp = item.timestamp;
+                if (!timestamp || timestamp === 0) {
+                    invalidCount++;
+                    return false;
+                }
+                const age = now - timestamp;
                 if (age >= CACHE_CLEANUP_MAX_AGE_MS) {
                     expiredCount++;
                     return false;
@@ -103,9 +101,11 @@ function cleanCache() {
     }
 }
 
-function saveCache() {
+function saveCache(shouldClean) {
     try {
-        cleanCache();
+        if (shouldClean) {
+            cleanCache();
+        }
         jobIdCache.lastUpdated = new Date().toISOString();
         fs.writeFileSync(CACHE_FILE, JSON.stringify(jobIdCache, null, 2));
         console.log(`[Cache] Saved ${jobIdCache.jobIds.length} servers to cache`);
