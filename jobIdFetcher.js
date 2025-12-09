@@ -228,11 +228,15 @@ function markAsUsed(jobIds) {
         const id = String(jobId).trim();
         if (!id) continue;
         
+        console.log(`[Cache] markAsUsed: Processing job ID: ${id}`);
         const idNormalized = id.toLowerCase();
         const wasNew = !usedJobIds.has(id);
         if (wasNew) {
             usedJobIds.add(id);
             added++;
+            console.log(`[Cache] markAsUsed: Added ${id} to blacklist (new)`);
+        } else {
+            console.log(`[Cache] markAsUsed: ${id} already in blacklist`);
         }
         
         // Remove from serverMap (check both exact match and case-insensitive)
@@ -244,12 +248,18 @@ function markAsUsed(jobIds) {
             
             if (mapIdStr === idNormalized || serverIdStr === idNormalized || mapId === id || (server && server.id === id)) {
                 idsToRemove.push(mapId);
+                console.log(`[Cache] markAsUsed: Found matching server in cache - mapId: ${mapId}, server.id: ${server ? server.id : 'N/A'}`);
             }
         }
         
         for (const mapId of idsToRemove) {
             serverMap.delete(mapId);
             removed++;
+            console.log(`[Cache] markAsUsed: Removed ${mapId} from cache`);
+        }
+        
+        if (idsToRemove.length === 0) {
+            console.log(`[Cache] markAsUsed: Job ID ${id} not found in cache (cache size: ${serverMap.size})`);
         }
     }
     
