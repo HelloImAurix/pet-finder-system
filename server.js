@@ -525,15 +525,25 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         try {
             const requestLimit = Math.max(limit * 5, 500);
             servers = jobIdFetcher.getFreshestServers(requestLimit, excludeList) || [];
+            
+            // Ensure servers is an array and has valid structure
+            if (!Array.isArray(servers)) {
+                console.error('[API] getFreshestServers returned non-array:', typeof servers);
+                servers = [];
+            }
         } catch (error) {
             console.error('[API] Error getting freshest servers:', error.message);
+            servers = [];
         }
         
         // Servers are already filtered and sorted by getFreshestServers
         // Filtered servers already exclude blacklisted and excluded IDs
-        const filtered = servers.slice(0, limit);
+        // Filter out any invalid server entries
+        const filtered = servers
+            .filter(s => s && s.id && typeof s.id === 'string' && s.id.trim().length > 0)
+            .slice(0, limit);
         
-        const serverIds = filtered.map(s => s.id);
+        const serverIds = filtered.map(s => String(s.id).trim()).filter(id => id.length > 0);
         const totalExcluded = excludeList.length + (cacheInfo.usedCount || 0);
         console.log(`[API] /job-ids: Returning ${filtered.length} servers (excluded ${excludeList.length} job IDs from request, ${cacheInfo.usedCount || 0} total blacklisted)`);
         if (serverIds.length > 0) {
@@ -550,7 +560,9 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
             count: filtered.length,
             totalAvailable: servers.length,
             cacheInfo: {
-                ...cacheInfo,
+                count: cacheInfo.count || 0,
+                lastUpdated: cacheInfo.lastUpdated || null,
+                placeId: cacheInfo.placeId || 0,
                 usedCount: cacheInfo.usedCount || 0
             }
         });
