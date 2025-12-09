@@ -551,17 +551,27 @@ module.exports = {
     removeVisitedServers: (visitedIds) => {
         try {
             if (!Array.isArray(visitedIds) || visitedIds.length === 0) return 0;
-            const visitedSet = new Set(visitedIds.map(id => String(id)));
+            const visitedSet = new Set(visitedIds.map(id => String(id).trim()).filter(id => id.length > 0));
+            if (visitedSet.size === 0) return 0;
+            
             const beforeCount = jobIdCache.jobIds.length;
             
             jobIdCache.jobIds = jobIdCache.jobIds.filter(item => {
-                const itemId = typeof item === 'object' && item !== null ? String(item.id) : String(item);
+                let itemId;
+                if (typeof item === 'string' || typeof item === 'number') {
+                    itemId = String(item).trim();
+                } else if (typeof item === 'object' && item !== null && item.id) {
+                    itemId = String(item.id).trim();
+                } else {
+                    return true;
+                }
                 return !visitedSet.has(itemId);
             });
             
             const removed = beforeCount - jobIdCache.jobIds.length;
             if (removed > 0) {
-                console.log(`[Cache] Removed ${removed} visited server(s) from cache`);
+                console.log(`[Cache] Removed ${removed} visited server(s) from cache (${visitedSet.size} requested)`);
+                saveCache(false);
             }
             return removed;
         } catch (error) {
