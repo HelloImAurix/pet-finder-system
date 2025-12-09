@@ -23,8 +23,36 @@ function loadCache() {
             const data = fs.readFileSync(CACHE_FILE, 'utf8');
             const parsed = JSON.parse(data);
             if (parsed && Array.isArray(parsed.jobIds)) {
-                jobIdCache = parsed;
-                console.log(`[Cache] Loaded ${jobIdCache.jobIds.length} servers`);
+                const seenIds = new Set();
+                const deduplicated = [];
+                
+                for (const item of parsed.jobIds) {
+                    let id;
+                    if (typeof item === 'string' || typeof item === 'number') {
+                        id = String(item).trim();
+                    } else if (typeof item === 'object' && item !== null && item.id) {
+                        id = String(item.id).trim();
+                    } else {
+                        continue;
+                    }
+                    
+                    if (id && !seenIds.has(id)) {
+                        seenIds.add(id);
+                        deduplicated.push(item);
+                    }
+                }
+                
+                jobIdCache = {
+                    ...parsed,
+                    jobIds: deduplicated
+                };
+                
+                const removedCount = parsed.jobIds.length - deduplicated.length;
+                if (removedCount > 0) {
+                    console.log(`[Cache] Loaded ${deduplicated.length} servers (removed ${removedCount} duplicates)`);
+                } else {
+                    console.log(`[Cache] Loaded ${deduplicated.length} servers`);
+                }
                 return true;
             } else {
                 jobIdCache = {
@@ -110,6 +138,32 @@ function saveCache(shouldClean) {
         if (shouldClean) {
             cleanCache();
         }
+        
+        const seenIds = new Set();
+        const deduplicated = [];
+        
+        for (const item of jobIdCache.jobIds) {
+            let id;
+            if (typeof item === 'string' || typeof item === 'number') {
+                id = String(item).trim();
+            } else if (typeof item === 'object' && item !== null && item.id) {
+                id = String(item.id).trim();
+            } else {
+                continue;
+            }
+            
+            if (id && !seenIds.has(id)) {
+                seenIds.add(id);
+                deduplicated.push(item);
+            }
+        }
+        
+        const removedCount = jobIdCache.jobIds.length - deduplicated.length;
+        if (removedCount > 0) {
+            console.log(`[Cache] Removed ${removedCount} duplicate servers before saving`);
+        }
+        
+        jobIdCache.jobIds = deduplicated;
         jobIdCache.lastUpdated = new Date().toISOString();
         fs.writeFileSync(CACHE_FILE, JSON.stringify(jobIdCache, null, 2));
         console.log(`[Cache] Saved ${jobIdCache.jobIds.length} servers to cache`);
@@ -308,13 +362,37 @@ async function fetchBulkJobIds() {
         
         const currentCount = jobIdCache.jobIds.length;
         if (currentCount - lastSaveCount >= 100) {
-            console.log(`[Cache] Saving cache: ${currentCount} servers (incremental save every 100)`);
+            const seenIds = new Set();
+            const deduplicated = [];
+            
+            for (const item of jobIdCache.jobIds) {
+                let id;
+                if (typeof item === 'string' || typeof item === 'number') {
+                    id = String(item).trim();
+                } else if (typeof item === 'object' && item !== null && item.id) {
+                    id = String(item.id).trim();
+                } else {
+                    continue;
+                }
+                
+                if (id && !seenIds.has(id)) {
+                    seenIds.add(id);
+                    deduplicated.push(item);
+                }
+            }
+            
+            jobIdCache.jobIds = deduplicated;
+            const deduplicatedCount = jobIdCache.jobIds.length;
+            if (currentCount !== deduplicatedCount) {
+                console.log(`[Cache] Removed ${currentCount - deduplicatedCount} duplicate servers before saving`);
+            }
+            console.log(`[Cache] Saving cache: ${deduplicatedCount} servers (incremental save every 100)`);
             try {
                 jobIdCache.lastUpdated = new Date().toISOString();
-                jobIdCache.totalFetched = currentCount;
+                jobIdCache.totalFetched = deduplicatedCount;
                 fs.writeFileSync(CACHE_FILE, JSON.stringify(jobIdCache, null, 2));
-                console.log(`[Cache] Saved ${currentCount} servers to cache`);
-                lastSaveCount = currentCount;
+                console.log(`[Cache] Saved ${deduplicatedCount} servers to cache`);
+                lastSaveCount = deduplicatedCount;
             } catch (saveError) {
                 console.error(`[Cache] Failed to save cache incrementally: ${saveError.message}`);
             }
