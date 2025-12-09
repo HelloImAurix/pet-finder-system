@@ -444,7 +444,9 @@ function getFreshestServers(limit = 2000, excludeIds = []) {
     const excludeSet = new Set();
     for (const id of excludeIds) {
         if (id) {
-            excludeSet.add(String(id).trim().toLowerCase());
+            const normalized = String(id).trim().toLowerCase();
+            excludeSet.add(normalized);
+            console.log(`[Cache] getFreshestServers: Excluding job ID: ${id} (normalized: ${normalized})`);
         }
     }
     
@@ -454,6 +456,10 @@ function getFreshestServers(limit = 2000, excludeIds = []) {
         if (id) {
             normalizedBlacklist.add(String(id).trim().toLowerCase());
         }
+    }
+    
+    if (excludeSet.size > 0) {
+        console.log(`[Cache] getFreshestServers: Excluding ${excludeSet.size} job IDs from request, ${normalizedBlacklist.size} blacklisted`);
     }
     
     // Remove blacklisted servers from serverMap permanently (they should not be in cache)
@@ -497,6 +503,9 @@ function getFreshestServers(limit = 2000, excludeIds = []) {
         // Filter out excluded servers (both blacklisted and request-excluded)
         // But don't remove request-excluded from cache - they're just filtered for this request
         if (allExcluded.has(jobIdStr) || allExcluded.has(serverIdStr)) {
+            if (excludeSet.has(jobIdStr) || excludeSet.has(serverIdStr)) {
+                console.log(`[Cache] getFreshestServers: Filtered out excluded server: ${server.id} (mapId: ${jobId})`);
+            }
             filteredOutCount++;
             continue;
         }
