@@ -651,6 +651,7 @@ module.exports = {
             if (visitedSet.size === 0) return 0;
             
             const beforeCount = jobIdCache.jobIds.length;
+            const removedIds = [];
             
             jobIdCache.jobIds = jobIdCache.jobIds.filter(item => {
                 let itemId;
@@ -661,12 +662,19 @@ module.exports = {
                 } else {
                     return true;
                 }
-                return !visitedSet.has(itemId);
+                
+                if (visitedSet.has(itemId)) {
+                    removedIds.push(itemId);
+                    return false;
+                }
+                return true;
             });
             
             const removed = beforeCount - jobIdCache.jobIds.length;
             if (removed > 0) {
-                console.log(`[Cache] Removed ${removed} visited server(s) from cache (${visitedSet.size} requested)`);
+                console.log(`[Cache] Removed ${removed} visited server(s) from cache (${visitedSet.size} requested): ${removedIds.slice(0, 5).join(', ')}${removedIds.length > 5 ? '...' : ''}`);
+            } else if (visitedSet.size > 0) {
+                console.log(`[Cache] Attempted to remove ${visitedSet.size} job ID(s) but none were found: ${Array.from(visitedSet).slice(0, 5).join(', ')}${visitedSet.size > 5 ? '...' : ''}`);
             }
             return removed;
         } catch (error) {
