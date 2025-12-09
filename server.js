@@ -515,7 +515,6 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         const exclude = req.query.exclude ? req.query.exclude.split(',') : [];
         
         jobIdFetcher.loadCache();
-        jobIdFetcher.cleanCache();
         const cacheInfo = jobIdFetcher.getCacheInfo();
         
         let servers = [];
@@ -529,7 +528,6 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         
         if (exclude.length > 0) {
             jobIdFetcher.removeVisitedServers(exclude);
-            jobIdFetcher.cleanCache();
         }
         
         const filtered = [];
@@ -598,7 +596,6 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
                     return;
                 }
                 isFetching = true;
-                jobIdFetcher.cleanCache();
                 jobIdFetcher.fetchBulkJobIds()
                     .then(result => {
                         jobIdFetcher.cleanCache();
@@ -662,9 +659,9 @@ app.post('/api/job-ids/refresh', authorize('ADMIN'), (req, res) => {
     setImmediate(() => {
         if (isFetching) return;
         isFetching = true;
-        jobIdFetcher.cleanCache();
         jobIdFetcher.fetchBulkJobIds()
             .then(result => {
+                jobIdFetcher.cleanCache();
                 jobIdFetcher.saveCache();
                 console.log(`[API] Manual refresh: ${result.total} servers available`);
                 isFetching = false;
@@ -719,7 +716,7 @@ function startServer() {
                             jobIdFetcher.cleanCache();
                             jobIdFetcher.saveCache();
                         }
-                    }, 30 * 1000);
+                    }, 60 * 1000);
                     
                     setInterval(() => {
                         if (isFetching) {
@@ -730,7 +727,6 @@ function startServer() {
                         
                         if (cacheInfo.count < 500 || cacheAge > 30000) {
                             isFetching = true;
-                            jobIdFetcher.cleanCache();
                             jobIdFetcher.fetchBulkJobIds()
                                 .then(result => {
                                     jobIdFetcher.cleanCache();
