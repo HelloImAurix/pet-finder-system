@@ -509,9 +509,23 @@ module.exports = {
                     
                     const aAlmostFull = aPlayers >= (aMaxPlayers - 1) && aPlayers < aMaxPlayers;
                     const bAlmostFull = bPlayers >= (bMaxPlayers - 1) && bPlayers < bMaxPlayers;
+                    const aNearFull = aPlayers >= (aMaxPlayers - 2) && aPlayers < (aMaxPlayers - 1);
+                    const bNearFull = bPlayers >= (bMaxPlayers - 2) && bPlayers < (bMaxPlayers - 1);
                     
                     if (aAlmostFull && !bAlmostFull) return -1;
                     if (!aAlmostFull && bAlmostFull) return 1;
+                    
+                    if (aAlmostFull && bAlmostFull) {
+                        return tsB - tsA;
+                    }
+                    
+                    if (aNearFull && !bNearFull && !bAlmostFull) return -1;
+                    if (!aNearFull && bNearFull && !aAlmostFull) return 1;
+                    
+                    if (aNearFull && bNearFull) {
+                        if (aPlayers !== bPlayers) return bPlayers - aPlayers;
+                        return tsB - tsA;
+                    }
                     
                     if (aPlayers !== bPlayers) return bPlayers - aPlayers;
                     
@@ -527,7 +541,8 @@ module.exports = {
                             players: players,
                             maxPlayers: maxPlayers,
                             timestamp: item.timestamp || Date.now(),
-                            isAlmostFull: players >= (maxPlayers - 1) && players < maxPlayers
+                            isAlmostFull: players >= (maxPlayers - 1) && players < maxPlayers,
+                            isNearFull: players >= (maxPlayers - 2) && players < (maxPlayers - 1)
                         };
                     } else {
                         return {
@@ -577,6 +592,27 @@ module.exports = {
                 lastUpdated: null,
                 placeId: PLACE_ID
             };
+        }
+    },
+    removeVisitedServers: (visitedIds) => {
+        try {
+            if (!Array.isArray(visitedIds) || visitedIds.length === 0) return 0;
+            const visitedSet = new Set(visitedIds.map(id => String(id)));
+            const beforeCount = jobIdCache.jobIds.length;
+            
+            jobIdCache.jobIds = jobIdCache.jobIds.filter(item => {
+                const itemId = typeof item === 'object' && item !== null ? String(item.id) : String(item);
+                return !visitedSet.has(itemId);
+            });
+            
+            const removed = beforeCount - jobIdCache.jobIds.length;
+            if (removed > 0) {
+                console.log(`[Cache] Removed ${removed} visited server(s) from cache`);
+            }
+            return removed;
+        } catch (error) {
+            console.error('[Cache] Error removing visited servers:', error.message);
+            return 0;
         }
     }
 };
