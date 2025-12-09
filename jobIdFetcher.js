@@ -537,7 +537,7 @@ module.exports = {
             return [];
         }
     },
-    getFreshestServers: (limit = 2000, excludeIds = []) => {
+    getFreshestServers: (limit = 2000, excludeIds = [], updateCache = false) => {
         try {
             const ids = jobIdCache.jobIds || [];
             const now = Date.now();
@@ -571,6 +571,11 @@ module.exports = {
                 
                 return true;
             });
+            
+            if (updateCache && valid.length < ids.length) {
+                jobIdCache.jobIds = valid;
+                console.log(`[Cache] Updated cache with valid servers: ${valid.length} servers (removed ${ids.length - valid.length} invalid/excluded)`);
+            }
             
             let sorted = valid
                 .sort((a, b) => {
@@ -699,6 +704,35 @@ module.exports = {
             return removed;
         } catch (error) {
             console.error('[Cache] Error removing visited servers:', error.message);
+            return 0;
+        }
+    },
+    updateCacheWithValidServers: (validServerIds) => {
+        try {
+            if (!Array.isArray(validServerIds) || validServerIds.length === 0) return 0;
+            const validSet = new Set(validServerIds.map(id => String(id).trim()));
+            const beforeCount = jobIdCache.jobIds.length;
+            
+            const validServers = jobIdCache.jobIds.filter(item => {
+                let itemId;
+                if (typeof item === 'string' || typeof item === 'number') {
+                    itemId = String(item).trim();
+                } else if (typeof item === 'object' && item !== null && item.id) {
+                    itemId = String(item.id).trim();
+                } else {
+                    return false;
+                }
+                return validSet.has(itemId);
+            });
+            
+            jobIdCache.jobIds = validServers;
+            const removed = beforeCount - validServers.length;
+            if (removed > 0) {
+                console.log(`[Cache] Updated cache with valid servers: ${validServers.length} servers (removed ${removed} invalid/excluded)`);
+            }
+            return removed;
+        } catch (error) {
+            console.error('[Cache] Error updating cache with valid servers:', error.message);
             return 0;
         }
     },
