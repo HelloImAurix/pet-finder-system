@@ -228,15 +228,27 @@ function markAsUsed(jobIds) {
         const id = String(jobId).trim();
         if (!id) continue;
         
+        const idNormalized = id.toLowerCase();
         const wasNew = !usedJobIds.has(id);
         if (wasNew) {
             usedJobIds.add(id);
             added++;
         }
         
-        // Always remove from serverMap, even if already blacklisted
-        if (serverMap.has(id)) {
-            serverMap.delete(id);
+        // Remove from serverMap (check both exact match and case-insensitive)
+        // Need to iterate through serverMap to find case-insensitive matches
+        const idsToRemove = [];
+        for (const [mapId, server] of serverMap.entries()) {
+            const mapIdStr = String(mapId).trim().toLowerCase();
+            const serverIdStr = server && server.id ? String(server.id).trim().toLowerCase() : mapIdStr;
+            
+            if (mapIdStr === idNormalized || serverIdStr === idNormalized || mapId === id || (server && server.id === id)) {
+                idsToRemove.push(mapId);
+            }
+        }
+        
+        for (const mapId of idsToRemove) {
+            serverMap.delete(mapId);
             removed++;
         }
     }
@@ -418,64 +430,94 @@ function getFreshestServers(limit = 2000, excludeIds = []) {
     const now = Date.now();
     const maxAge = JOB_ID_MAX_AGE_MS;
     
-    // First, remove any blacklisted servers from serverMap
-    const idsToRemove = [];
-    for (const [mapId, server] of serverMap.entries()) {
-        const mapIdStr = String(mapId).trim().toLowerCase();
-        const serverIdStr = server && server.id ? String(server.id).trim().toLowerCase() : mapIdStr;
-        
-        // Check if this server is blacklisted
-        for (const usedId of usedJobIds) {
-            const usedIdStr = String(usedId).trim().toLowerCase();
-            if (mapIdStr === usedIdStr || serverIdStr === usedIdStr) {
-                idsToRemove.push(mapId);
-                break;
-            }
+    // Normalize excludeIds to lowercase for comparison (temporary exclusion for this request)
+    const excludeSet = new Set();
+    for (const id of excludeIds) {
+        if (id) {
+            excludeSet.add(String(id).trim().toLowerCase());
         }
     }
     
-    // Remove blacklisted servers from map
-    for (const id of idsToRemove) {
+    // Normalize all blacklisted IDs to lowercase for comparison (permanent exclusion)
+    const normalizedBlacklist = new Set();
+    for (const id of usedJobIds) {
+        if (id) {
+            normalizedBlacklist.add(String(id).trim().toLowerCase());
+        }
+    }
+    
+    // Remove blacklisted servers from serverMap permanently (they should not be in cache)
+    const blacklistedToRemove = [];
+    for (const [mapId, server] of serverMap.entries()) {
+        if (!server || !server.id) {
+            blacklistedToRemove.push(mapId);
+            continue;
+        }
+        
+        const mapIdStr = String(mapId).trim().toLowerCase();
+        const serverIdStr = String(server.id).trim().toLowerCase();
+        
+        // Only remove permanently blacklisted servers, not temporarily excluded ones
+        if (normalizedBlacklist.has(mapIdStr) || normalizedBlacklist.has(serverIdStr)) {
+            blacklistedToRemove.push(mapId);
+        }
+    }
+    
+    // Remove blacklisted servers from map permanently
+    for (const id of blacklistedToRemove) {
         serverMap.delete(id);
     }
     
-    const excludeSet = new Set(excludeIds.map(id => String(id).trim().toLowerCase()));
-    
-    // Normalize all blacklisted IDs to lowercase for comparison
-    const normalizedBlacklist = new Set(Array.from(usedJobIds).map(id => String(id).trim().toLowerCase()));
-    
-    // Combine excludeIds with usedJobIds (both normalized)
+    // Combine excludeIds with usedJobIds for filtering (both normalized)
+    // Note: excludeIds are temporary (just for this request), usedJobIds are permanent
     const allExcluded = new Set([...normalizedBlacklist, ...excludeSet]);
     
     const validServers = [];
-    let excludedCount = idsToRemove.length;
-    let excludedIds = idsToRemove.map(id => String(id));
+    let filteredOutCount = 0;
     
     for (const [jobId, server] of serverMap.entries()) {
-        const jobIdStr = String(jobId).trim().toLowerCase();
-        const serverIdStr = server && server.id ? String(server.id).trim().toLowerCase() : jobIdStr;
+        if (!server || !server.id) {
+            filteredOutCount++;
+            continue;
+        }
         
-        // Check both the map key and the server.id property
+        const jobIdStr = String(jobId).trim().toLowerCase();
+        const serverIdStr = String(server.id).trim().toLowerCase();
+        
+        // Filter out excluded servers (both blacklisted and request-excluded)
+        // But don't remove request-excluded from cache - they're just filtered for this request
         if (allExcluded.has(jobIdStr) || allExcluded.has(serverIdStr)) {
-            excludedCount++;
-            excludedIds.push(serverIdStr || jobIdStr);
-            // Also remove it from the map
-            serverMap.delete(jobId);
+            filteredOutCount++;
             continue;
         }
         
         const age = now - (server.timestamp || 0);
-        if (age >= maxAge) continue;
+        if (age >= maxAge) {
+            filteredOutCount++;
+            continue;
+        }
         
         const players = server.players || 0;
         const maxPlayers = server.maxPlayers || 8;
-        if (players >= maxPlayers || players < 0 || players > maxPlayers) continue;
+        if (players >= maxPlayers || players < 0 || players > maxPlayers) {
+            filteredOutCount++;
+            continue;
+        }
         
         const isAlmostFull = players >= (maxPlayers - 1) && players < maxPlayers;
         const isNearFull = players >= (maxPlayers - 2) && players < (maxPlayers - 1);
-        if (isAlmostFull && age > 60000) continue;
-        if (isNearFull && age > 90000) continue;
-        if (age > 180000) continue;
+        if (isAlmostFull && age > 60000) {
+            filteredOutCount++;
+            continue;
+        }
+        if (isNearFull && age > 90000) {
+            filteredOutCount++;
+            continue;
+        }
+        if (age > 180000) {
+            filteredOutCount++;
+            continue;
+        }
         
         validServers.push(server);
     }
@@ -499,14 +541,10 @@ function getFreshestServers(limit = 2000, excludeIds = []) {
         priority: server.priority
     }));
     
-    if (result.length > 0 || allExcluded.size > 0 || excludedCount > 0) {
-        const requestExcluded = excludeIds.length;
-        const blacklisted = usedJobIds.size;
-        if (excludedCount > 0) {
-            console.log(`[Cache] getFreshestServers: Excluded ${excludedCount} blacklisted/requested IDs: ${excludedIds.slice(0, 3).join(', ')}${excludedIds.length > 3 ? '...' : ''}`);
-        }
-        console.log(`[Cache] getFreshestServers: Returning ${result.length} servers (excluded ${requestExcluded} from request, ${blacklisted} blacklisted, ${excludedCount} filtered out) (first 5: ${result.slice(0, 5).map(s => s.id).join(', ')})`);
-    }
+    // Log with accurate counts
+    const requestExcluded = excludeSet.size;
+    const totalBlacklisted = normalizedBlacklist.size;
+    console.log(`[Cache] getFreshestServers: Returning ${result.length} servers (excluded ${requestExcluded} from request, ${totalBlacklisted} blacklisted, ${filteredOutCount} filtered out) (first 5: ${result.slice(0, 5).map(s => s.id).join(', ')})`);
     
     return result;
 }
