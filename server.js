@@ -565,6 +565,15 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
             })
             .slice(0, limit);
         
+        res.json({
+            success: true,
+            jobIds: filtered.map(s => s.id),
+            servers: filtered,
+            count: filtered.length,
+            totalAvailable: servers.length,
+            cacheInfo: cacheInfo
+        });
+        
         const cacheAge = cacheInfo.lastUpdated ? (Date.now() - new Date(cacheInfo.lastUpdated).getTime()) : Infinity;
         const shouldRefresh = !isFetching && (
             cacheInfo.count < 500 || 
@@ -593,9 +602,9 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         
         res.json({
             success: true,
-            jobIds: limited.map(s => s.id),
-            servers: limited,
-            count: limited.length,
+            jobIds: filtered.map(s => s.id),
+            servers: filtered,
+            count: filtered.length,
             totalAvailable: servers.length,
             cacheInfo: cacheInfo
         });
