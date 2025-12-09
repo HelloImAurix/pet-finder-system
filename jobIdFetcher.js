@@ -438,7 +438,9 @@ async function fetchBulkJobIds() {
 // Get freshest servers (excluding used ones)
 function getFreshestServers(limit = 2000, excludeIds = []) {
     const now = Date.now();
-    const maxAge = JOB_ID_MAX_AGE_MS;
+    // Use cache cleanup age (10 minutes) instead of job ID max age (3 minutes)
+    // This is more lenient and allows servers to be used as long as they're in cache
+    const maxValidAge = CACHE_CLEANUP_MAX_AGE_MS;
     
     // Normalize excludeIds to lowercase for comparison (temporary exclusion for this request)
     const excludeSet = new Set();
@@ -511,7 +513,10 @@ function getFreshestServers(limit = 2000, excludeIds = []) {
         }
         
         const age = now - (server.timestamp || 0);
-        if (age >= maxAge) {
+        
+        // Use a more lenient age check - servers can be up to 10 minutes old
+        // The cache cleanup removes servers older than 10 minutes, so anything in cache is still valid
+        if (age >= maxValidAge) {
             filteredOutCount++;
             continue;
         }
@@ -523,17 +528,17 @@ function getFreshestServers(limit = 2000, excludeIds = []) {
             continue;
         }
         
+        // More lenient age checks for almost-full servers
+        // Almost full servers: allow up to 5 minutes old
+        // Near full servers: allow up to 7 minutes old
+        // Other servers: allow up to 10 minutes old (handled above)
         const isAlmostFull = players >= (maxPlayers - 1) && players < maxPlayers;
         const isNearFull = players >= (maxPlayers - 2) && players < (maxPlayers - 1);
-        if (isAlmostFull && age > 60000) {
+        if (isAlmostFull && age > 300000) { // 5 minutes
             filteredOutCount++;
             continue;
         }
-        if (isNearFull && age > 90000) {
-            filteredOutCount++;
-            continue;
-        }
-        if (age > 180000) {
+        if (isNearFull && age > 420000) { // 7 minutes
             filteredOutCount++;
             continue;
         }
@@ -560,10 +565,17 @@ function getFreshestServers(limit = 2000, excludeIds = []) {
         priority: server.priority
     }));
     
-    // Log with accurate counts
+    // Log with accurate counts and breakdown
     const requestExcluded = excludeSet.size;
     const totalBlacklisted = normalizedBlacklist.size;
-    console.log(`[Cache] getFreshestServers: Returning ${result.length} servers (excluded ${requestExcluded} from request, ${totalBlacklisted} blacklisted, ${filteredOutCount} filtered out) (first 5: ${result.slice(0, 5).map(s => s.id).join(', ')})`);
+    const totalInCache = serverMap.size;
+    
+    if (filteredOutCount > 0 && result.length === 0) {
+        console.log(`[Cache] getFreshestServers: WARNING - All ${totalInCache} servers filtered out! (excluded ${requestExcluded}, blacklisted ${totalBlacklisted}, filtered ${filteredOutCount})`);
+        console.log(`[Cache] getFreshestServers: Cache size: ${totalInCache}, Max age: ${CACHE_CLEANUP_MAX_AGE_MS}ms (${Math.floor(CACHE_CLEANUP_MAX_AGE_MS / 60000)} minutes)`);
+    } else {
+        console.log(`[Cache] getFreshestServers: Returning ${result.length} servers (excluded ${requestExcluded} from request, ${totalBlacklisted} blacklisted, ${filteredOutCount} filtered out, ${totalInCache} in cache) (first 5: ${result.slice(0, 5).map(s => s.id).join(', ')})`);
+    }
     
     return result;
 }
