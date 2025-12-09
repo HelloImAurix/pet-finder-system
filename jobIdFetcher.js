@@ -531,9 +531,18 @@ module.exports = {
                     };
                 });
             
-            jobIdCache.jobIds = valid;
+            if (excludeIds.length > 0 && sorted.length > 0) {
+                const beforeExclude = sorted.length;
+                const excludeSet = new Set(excludeIds.map(id => String(id).trim()));
+                sorted = sorted.filter(server => !excludeSet.has(server.id));
+                if (beforeExclude !== sorted.length) {
+                    console.log(`[Cache] getFreshestServers: Filtered out ${beforeExclude - sorted.length} excluded servers`);
+                }
+            }
+            
             if (sorted.length > 0) {
-                console.log(`[Cache] getFreshestServers: Returning ${sorted.length} servers (first 5: ${sorted.slice(0, 5).map(s => s.id).join(', ')})`);
+                const excludedCount = excludeIds.length;
+                console.log(`[Cache] getFreshestServers: Returning ${sorted.length} servers (excluded ${excludedCount} IDs) (first 5: ${sorted.slice(0, 5).map(s => s.id).join(', ')})`);
             }
             return sorted;
         } catch (error) {
