@@ -9,7 +9,7 @@ const PAGES_TO_FETCH = parseInt(process.env.PAGES_TO_FETCH || '100', 10);
 const DELAY_BETWEEN_REQUESTS = parseInt(process.env.DELAY_BETWEEN_REQUESTS || '6000', 10);
 const MIN_PLAYERS = parseInt(process.env.MIN_PLAYERS || '1', 10);
 const MAX_PLAYERS = parseInt(process.env.MAX_PLAYERS || '6', 10);
-const JOB_ID_MAX_AGE_MS = parseInt(process.env.JOB_ID_MAX_AGE_MS || '180000', 10);
+const JOB_ID_MAX_AGE_MS = parseInt(process.env.JOB_ID_MAX_AGE_MS || '60000', 10);
 let jobIdCache = {
     jobIds: [],
     lastUpdated: null,
@@ -91,6 +91,19 @@ function cleanCache() {
                     invalidCount++;
                     return false;
                 }
+                
+                const isAlmostFull = players >= (maxPlayers - 1) && players < maxPlayers;
+                const isNearFull = players >= (maxPlayers - 2) && players < (maxPlayers - 1);
+                
+                if (isAlmostFull && age > 15000) {
+                    fullCount++;
+                    return false;
+                }
+                
+                if (isNearFull && age > 30000) {
+                    return false;
+                }
+                
                 return true;
             }
             invalidCount++;
@@ -486,11 +499,17 @@ module.exports = {
                         if (players < 0 || players > maxPlayers) return false;
                         
                         const isAlmostFull = players >= (maxPlayers - 1) && players < maxPlayers;
-                        if (isAlmostFull && age > 120000) {
+                        const isNearFull = players >= (maxPlayers - 2) && players < (maxPlayers - 1);
+                        
+                        if (isAlmostFull && age > 15000) {
                             return false;
                         }
                         
-                        if (age > 180000) {
+                        if (isNearFull && age > 30000) {
+                            return false;
+                        }
+                        
+                        if (age > 60000) {
                             return false;
                         }
                         
@@ -514,22 +533,14 @@ module.exports = {
                     
                     if (aAlmostFull && !bAlmostFull) return -1;
                     if (!aAlmostFull && bAlmostFull) return 1;
-                    
-                    if (aAlmostFull && bAlmostFull) {
-                        return tsB - tsA;
-                    }
-                    
                     if (aNearFull && !bNearFull && !bAlmostFull) return -1;
                     if (!aNearFull && bNearFull && !aAlmostFull) return 1;
                     
-                    if (aNearFull && bNearFull) {
-                        if (aPlayers !== bPlayers) return bPlayers - aPlayers;
-                        return tsB - tsA;
-                    }
-                    
                     if (aPlayers !== bPlayers) return bPlayers - aPlayers;
                     
-                    return tsB - tsA;
+                    const aAge = now - tsA;
+                    const bAge = now - tsB;
+                    return aAge - bAge;
                 })
                 .slice(0, limit)
                 .map(item => {
@@ -613,6 +624,30 @@ module.exports = {
         } catch (error) {
             console.error('[Cache] Error removing visited servers:', error.message);
             return 0;
+        }
+    },
+    markServerAsFull: (serverId) => {
+        try {
+            if (!serverId) return false;
+            const serverIdStr = String(serverId);
+            const beforeCount = jobIdCache.jobIds.length;
+            
+            jobIdCache.jobIds = jobIdCache.jobIds.filter(item => {
+                const itemId = typeof item === 'object' && item !== null ? String(item.id) : String(item);
+                if (itemId === serverIdStr) {
+                    const players = typeof item === 'object' && item !== null ? (item.players || 0) : 0;
+                    const maxPlayers = typeof item === 'object' && item !== null ? (item.maxPlayers || 8) : 8;
+                    if (players >= maxPlayers) {
+                        return false;
+                    }
+                }
+                return true;
+            });
+            
+            return beforeCount !== jobIdCache.jobIds.length;
+        } catch (error) {
+            console.error('[Cache] Error marking server as full:', error.message);
+            return false;
         }
     }
 };
