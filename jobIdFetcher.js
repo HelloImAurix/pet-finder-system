@@ -26,6 +26,12 @@ function loadCache() {
                 jobIdCache = parsed;
                 const originalLength = jobIdCache.jobIds.length;
                 cleanCache();
+                const cleaned = originalLength - jobIdCache.jobIds.length;
+                if (cleaned > 0) {
+                    console.log(`[Cache] Loaded ${jobIdCache.jobIds.length} servers (cleaned ${cleaned} invalid/expired)`);
+                } else {
+                    console.log(`[Cache] Loaded ${jobIdCache.jobIds.length} servers`);
+                }
                 return true;
             } else {
                 jobIdCache = {
@@ -37,6 +43,7 @@ function loadCache() {
             }
         }
     } catch (error) {
+        console.error('[Cache] Failed to load cache:', error.message);
         jobIdCache = {
             jobIds: [],
             lastUpdated: null,
@@ -98,6 +105,7 @@ function saveCache() {
         cleanCache();
         jobIdCache.lastUpdated = new Date().toISOString();
         fs.writeFileSync(CACHE_FILE, JSON.stringify(jobIdCache, null, 2));
+        console.log(`[Cache] Saved ${jobIdCache.jobIds.length} servers to cache`);
         return true;
     } catch (error) {
         console.error('[Cache] Failed to save cache:', error.message);
@@ -170,6 +178,7 @@ async function fetchPage(cursor = null, retryCount = 0) {
 }
 
 async function fetchBulkJobIds() {
+    console.log(`[Fetch] Starting bulk fetch: target ${MAX_JOB_IDS} servers, up to ${PAGES_TO_FETCH} pages`);
     
     const now = Date.now();
     const maxAge = JOB_ID_MAX_AGE_MS;
@@ -196,7 +205,11 @@ async function fetchBulkJobIds() {
         return false;
     });
     
-    
+    const expiredCount = beforeCleanup - validExistingServers.length;
+    if (expiredCount > 0) {
+        console.log(`[Fetch] Removed ${expiredCount} expired servers from cache`);
+    }
+    console.log(`[Fetch] Starting with ${validExistingServers.length} valid cached servers`);
     jobIdCache.jobIds = [...validExistingServers];
     const existingJobIds = new Set(existingValidIds);
     let cursor = null;
@@ -297,16 +310,19 @@ async function fetchBulkJobIds() {
         }
         
         pagesFetched++;
-        const filterDetails = [];
-        if (filterStats.full > 0) filterDetails.push(`${filterStats.full} full`);
-        if (filterStats.private > 0) filterDetails.push(`${filterStats.private} private`);
-        if (filterStats.lowPlayers > 0) filterDetails.push(`${filterStats.lowPlayers} low players`);
-        if (filterStats.duplicate > 0) filterDetails.push(`${filterStats.duplicate} duplicate`);
-        if (filterStats.invalid > 0) filterDetails.push(`${filterStats.invalid} invalid`);
-        if (filterStats.tooMany > 0) filterDetails.push(`${filterStats.tooMany} cache full`);
+        
+        if (pagesFetched % 10 === 0 || pageAdded > 0) {
+            const filterDetails = [];
+            if (filterStats.full > 0) filterDetails.push(`${filterStats.full} full`);
+            if (filterStats.private > 0) filterDetails.push(`${filterStats.private} private`);
+            if (filterStats.duplicate > 0) filterDetails.push(`${filterStats.duplicate} duplicate`);
+            const filterSummary = filterDetails.length > 0 ? ` (filtered: ${filterDetails.join(', ')})` : '';
+            console.log(`[Fetch] Page ${pagesFetched}: +${pageAdded} servers (total: ${jobIdCache.jobIds.length}/${MAX_JOB_IDS})${filterSummary}`);
+        }
         
         const currentCount = jobIdCache.jobIds.length;
         if (currentCount - lastSaveCount >= 100) {
+            console.log(`[Fetch] Incremental save: ${currentCount} servers cached`);
             await new Promise((resolve) => {
                 setImmediate(() => {
                     try {
@@ -357,6 +373,9 @@ async function fetchBulkJobIds() {
     });
     
     jobIdCache.totalFetched = jobIdCache.jobIds.length;
+    
+    const keptFromOld = validExistingServers.length;
+    console.log(`[Fetch] Complete: ${jobIdCache.jobIds.length}/${MAX_JOB_IDS} servers cached (kept ${keptFromOld}, added ${totalAdded}, scanned ${totalScanned})`);
     
     return {
         total: jobIdCache.jobIds.length,
