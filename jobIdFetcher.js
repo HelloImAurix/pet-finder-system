@@ -8,7 +8,6 @@ const MAX_JOB_IDS = parseInt(process.env.MAX_JOB_IDS || '2000', 10);
 const PAGES_TO_FETCH = parseInt(process.env.PAGES_TO_FETCH || '200', 10);
 const DELAY_BETWEEN_REQUESTS = parseInt(process.env.DELAY_BETWEEN_REQUESTS || '2000', 10);
 const MIN_PLAYERS = parseInt(process.env.MIN_PLAYERS || '1', 10);
-const MAX_PLAYERS = parseInt(process.env.MAX_PLAYERS || '6', 10);
 const JOB_ID_MAX_AGE_MS = parseInt(process.env.JOB_ID_MAX_AGE_MS || '180000', 10);
 const CACHE_CLEANUP_MAX_AGE_MS = parseInt(process.env.CACHE_CLEANUP_MAX_AGE_MS || '600000', 10);
 let jobIdCache = {
