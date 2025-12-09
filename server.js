@@ -598,8 +598,7 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
                 isFetching = true;
                 jobIdFetcher.fetchBulkJobIds()
                     .then(result => {
-                        jobIdFetcher.cleanCache();
-                        jobIdFetcher.saveCache();
+                        jobIdFetcher.saveCache(true);
                         console.log(`[API] Cache refreshed: ${result.total} servers available`);
                         isFetching = false;
                     })
@@ -661,8 +660,7 @@ app.post('/api/job-ids/refresh', authorize('ADMIN'), (req, res) => {
         isFetching = true;
         jobIdFetcher.fetchBulkJobIds()
             .then(result => {
-                jobIdFetcher.cleanCache();
-                jobIdFetcher.saveCache();
+                jobIdFetcher.saveCache(true);
                 console.log(`[API] Manual refresh: ${result.total} servers available`);
                 isFetching = false;
             })
@@ -713,10 +711,9 @@ function startServer() {
                     
                     setInterval(() => {
                         if (!isFetching) {
-                            jobIdFetcher.cleanCache();
-                            jobIdFetcher.saveCache();
+                            jobIdFetcher.saveCache(true);
                         }
-                    }, 60 * 1000);
+                    }, 120 * 1000);
                     
                     setInterval(() => {
                         if (isFetching) {
@@ -729,8 +726,7 @@ function startServer() {
                             isFetching = true;
                             jobIdFetcher.fetchBulkJobIds()
                                 .then(result => {
-                                    jobIdFetcher.cleanCache();
-                                    jobIdFetcher.saveCache();
+                                    jobIdFetcher.saveCache(true);
                                     console.log(`[API] Auto-refresh: ${result.total} servers available`);
                                     isFetching = false;
                                 })
