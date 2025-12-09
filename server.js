@@ -545,6 +545,18 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         
         const serverIds = filtered.map(s => String(s.id).trim()).filter(id => id.length > 0);
         const totalExcluded = excludeList.length + (cacheInfo.usedCount || 0);
+        
+        // Verify excluded IDs are not in the response
+        if (excludeList.length > 0) {
+            const excludeSet = new Set(excludeList.map(id => String(id).trim().toLowerCase()));
+            for (const serverId of serverIds) {
+                const normalized = String(serverId).trim().toLowerCase();
+                if (excludeSet.has(normalized)) {
+                    console.error(`[API] ERROR: Excluded job ID ${serverId} is in the response! This should not happen!`);
+                }
+            }
+        }
+        
         console.log(`[API] /job-ids: Returning ${filtered.length} servers (excluded ${excludeList.length} job IDs from request, ${cacheInfo.usedCount || 0} total blacklisted)`);
         if (serverIds.length > 0) {
             console.log(`[API] Returning job IDs: ${serverIds.slice(0, 5).join(', ')}${serverIds.length > 5 ? '...' : ''}`);
