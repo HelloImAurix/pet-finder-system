@@ -523,6 +523,9 @@ module.exports = {
                 });
             
             jobIdCache.jobIds = valid;
+            if (sorted.length > 0) {
+                console.log(`[Cache] getFreshestServers: Returning ${sorted.length} servers (first 5: ${sorted.slice(0, 5).map(s => s.id).join(', ')})`);
+            }
             return sorted;
         } catch (error) {
             console.error('[Cache] Error getting freshest servers:', error.message);
