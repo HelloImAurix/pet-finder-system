@@ -518,8 +518,15 @@ function getFreshestServers(limit = 2000, excludeIds = []) {
             for (const excludeId of excludeIds) {
                 const excludeIdStr = String(excludeId).trim();
                 const excludeIdNormalized = excludeIdStr.toLowerCase();
-                if (originalServerId === excludeIdStr || jobIdStr === excludeIdNormalized || serverIdStr === excludeIdNormalized) {
-                    console.log(`[Cache] getFreshestServers: Filtered out excluded server (exact match): ${originalServerId}`);
+                
+                // Check all possible matches: original vs original, normalized vs normalized, and cross-comparisons
+                if (originalServerId === excludeIdStr || 
+                    originalServerId.toLowerCase() === excludeIdNormalized ||
+                    jobIdStr === excludeIdNormalized || 
+                    serverIdStr === excludeIdNormalized ||
+                    String(jobId).trim() === excludeIdStr ||
+                    String(jobId).trim().toLowerCase() === excludeIdNormalized) {
+                    console.log(`[Cache] getFreshestServers: Filtered out excluded server (exact match): ${originalServerId} (excludeId: ${excludeIdStr})`);
                     isExcluded = true;
                     break;
                 }
@@ -583,6 +590,40 @@ function getFreshestServers(limit = 2000, excludeIds = []) {
         isNearFull: server.players >= (server.maxPlayers - 2) && server.players < (server.maxPlayers - 1),
         priority: server.priority
     }));
+    
+    // Final verification: ensure no excluded IDs are in the result
+    if (excludeSet.size > 0) {
+        const excludedInResult = [];
+        for (const server of result) {
+            const serverId = String(server.id).trim();
+            const normalized = serverId.toLowerCase();
+            for (const excludeId of excludeIds) {
+                const excludeIdStr = String(excludeId).trim();
+                const excludeIdNormalized = excludeIdStr.toLowerCase();
+                if (serverId === excludeIdStr || normalized === excludeIdNormalized) {
+                    excludedInResult.push(serverId);
+                    console.error(`[Cache] getFreshestServers: CRITICAL - Excluded ID ${serverId} found in result!`);
+                }
+            }
+        }
+        
+        // Remove any excluded IDs that somehow got through
+        if (excludedInResult.length > 0) {
+            result = result.filter(s => {
+                const serverId = String(s.id).trim();
+                const normalized = serverId.toLowerCase();
+                for (const excludeId of excludeIds) {
+                    const excludeIdStr = String(excludeId).trim();
+                    const excludeIdNormalized = excludeIdStr.toLowerCase();
+                    if (serverId === excludeIdStr || normalized === excludeIdNormalized) {
+                        return false;
+                    }
+                }
+                return true;
+            });
+            console.error(`[Cache] getFreshestServers: Removed ${excludedInResult.length} excluded IDs from result!`);
+        }
+    }
     
     // Log with accurate counts and breakdown
     const requestExcluded = excludeSet.size;
