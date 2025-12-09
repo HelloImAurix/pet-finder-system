@@ -464,54 +464,31 @@ function getFreshestServers(limit = 2000, excludeIds = []) {
         console.log(`[Cache] getFreshestServers: Excluding ${excludeSet.size} job IDs from request, ${normalizedBlacklist.size} blacklisted`);
     }
     
-    // Remove blacklisted AND excluded servers from serverMap (they should not be in cache)
-    const serversToRemove = [];
+    // Remove ONLY permanently blacklisted servers from serverMap (they should not be in cache)
+    // DO NOT remove excluded servers - they should stay in cache, just filtered from response
+    const blacklistedToRemove = [];
     for (const [mapId, server] of serverMap.entries()) {
         if (!server || !server.id) {
-            serversToRemove.push(mapId);
+            blacklistedToRemove.push(mapId);
             continue;
         }
         
         const mapIdStr = String(mapId).trim().toLowerCase();
         const serverIdStr = String(server.id).trim().toLowerCase();
-        const originalServerId = String(server.id).trim();
         
-        // Remove permanently blacklisted servers
+        // Only remove permanently blacklisted servers, NOT temporarily excluded ones
         if (normalizedBlacklist.has(mapIdStr) || normalizedBlacklist.has(serverIdStr)) {
-            serversToRemove.push(mapId);
-            continue;
-        }
-        
-        // ALSO remove excluded servers from cache - don't just filter them
-        // This ensures they're completely gone from the response
-        if (excludeSet.has(mapIdStr) || excludeSet.has(serverIdStr)) {
-            console.log(`[Cache] getFreshestServers: Removing excluded server from cache: ${originalServerId}`);
-            serversToRemove.push(mapId);
-            continue;
-        }
-        
-        // Double-check with original IDs (case-sensitive)
-        for (const excludeId of excludeIds) {
-            const excludeIdStr = String(excludeId).trim();
-            const excludeIdNormalized = excludeIdStr.toLowerCase();
-            if (originalServerId === excludeIdStr || 
-                mapIdStr === excludeIdNormalized || 
-                serverIdStr === excludeIdNormalized ||
-                String(mapId).trim() === excludeIdStr) {
-                console.log(`[Cache] getFreshestServers: Removing excluded server from cache (exact match): ${originalServerId}`);
-                serversToRemove.push(mapId);
-                break;
-            }
+            blacklistedToRemove.push(mapId);
         }
     }
     
-    // Remove blacklisted and excluded servers from map
-    for (const id of serversToRemove) {
+    // Remove only blacklisted servers from map (excluded servers stay in cache)
+    for (const id of blacklistedToRemove) {
         serverMap.delete(id);
     }
     
-    if (serversToRemove.length > 0) {
-        console.log(`[Cache] getFreshestServers: Removed ${serversToRemove.length} servers from cache (blacklisted + excluded)`);
+    if (blacklistedToRemove.length > 0) {
+        console.log(`[Cache] getFreshestServers: Removed ${blacklistedToRemove.length} blacklisted servers from cache`);
     }
     
     // Combine excludeIds with usedJobIds for filtering (both normalized)
@@ -531,17 +508,25 @@ function getFreshestServers(limit = 2000, excludeIds = []) {
         const serverIdStr = String(server.id).trim().toLowerCase();
         const originalServerId = String(server.id).trim();
         
-        // Note: Excluded servers should already be removed from serverMap above
-        // This is just a safety check in case any slipped through
+        // Filter out excluded servers (both blacklisted and request-excluded)
+        // But DON'T remove them from cache - they're just filtered for this request
         let isExcluded = false;
+        
+        // First check: normalized comparison with allExcluded set
         if (allExcluded.has(jobIdStr) || allExcluded.has(serverIdStr)) {
-            console.error(`[Cache] getFreshestServers: ERROR - Excluded server still in cache: ${originalServerId}! Removing now.`);
-            serverMap.delete(jobId); // Remove it immediately
-            filteredOutCount++;
-            continue;
+            if (excludeSet.has(jobIdStr) || excludeSet.has(serverIdStr)) {
+                // This is a temporarily excluded server - just filter it, don't remove from cache
+                console.log(`[Cache] getFreshestServers: Filtering excluded server (normalized match): ${originalServerId}`);
+                filteredOutCount++;
+                continue;
+            } else {
+                // This is a blacklisted server - should have been removed above, but filter it just in case
+                filteredOutCount++;
+                continue;
+            }
         }
         
-        // Double-check: if the original (non-normalized) ID is in exclude list, remove it
+        // Second check: exact match with original IDs (case-sensitive)
         for (const excludeId of excludeIds) {
             const excludeIdStr = String(excludeId).trim();
             const excludeIdNormalized = excludeIdStr.toLowerCase();
@@ -553,8 +538,8 @@ function getFreshestServers(limit = 2000, excludeIds = []) {
                 serverIdStr === excludeIdNormalized ||
                 String(jobId).trim() === excludeIdStr ||
                 String(jobId).trim().toLowerCase() === excludeIdNormalized) {
-                console.error(`[Cache] getFreshestServers: ERROR - Excluded server still in cache (exact match): ${originalServerId}! Removing now.`);
-                serverMap.delete(jobId); // Remove it immediately
+                // Filter it out but keep it in cache
+                console.log(`[Cache] getFreshestServers: Filtering excluded server (exact match): ${originalServerId} (excludeId: ${excludeIdStr})`);
                 filteredOutCount++;
                 isExcluded = true;
                 break;
@@ -618,7 +603,7 @@ function getFreshestServers(limit = 2000, excludeIds = []) {
         priority: server.priority
     }));
     
-    // Final verification: ensure no excluded IDs are in the result
+    // Final verification: ensure no excluded IDs are in the result (they should be filtered out above)
     if (excludeSet.size > 0) {
         const excludedInResult = [];
         for (const server of result) {
@@ -629,12 +614,12 @@ function getFreshestServers(limit = 2000, excludeIds = []) {
                 const excludeIdNormalized = excludeIdStr.toLowerCase();
                 if (serverId === excludeIdStr || normalized === excludeIdNormalized) {
                     excludedInResult.push(serverId);
-                    console.error(`[Cache] getFreshestServers: CRITICAL - Excluded ID ${serverId} found in result!`);
+                    console.error(`[Cache] getFreshestServers: CRITICAL - Excluded ID ${serverId} found in result! This should not happen!`);
                 }
             }
         }
         
-        // Remove any excluded IDs that somehow got through
+        // Remove any excluded IDs that somehow got through (safety check)
         if (excludedInResult.length > 0) {
             result = result.filter(s => {
                 const serverId = String(s.id).trim();
@@ -648,7 +633,7 @@ function getFreshestServers(limit = 2000, excludeIds = []) {
                 }
                 return true;
             });
-            console.error(`[Cache] getFreshestServers: Removed ${excludedInResult.length} excluded IDs from result!`);
+            console.error(`[Cache] getFreshestServers: Removed ${excludedInResult.length} excluded IDs from result (safety check)!`);
         }
     }
     
