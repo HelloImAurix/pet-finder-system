@@ -546,13 +546,30 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         const serverIds = filtered.map(s => String(s.id).trim()).filter(id => id.length > 0);
         const totalExcluded = excludeList.length + (cacheInfo.usedCount || 0);
         
-        // Verify excluded IDs are not in the response
+        // Verify excluded IDs are not in the response and remove them if found
         if (excludeList.length > 0) {
             const excludeSet = new Set(excludeList.map(id => String(id).trim().toLowerCase()));
+            const beforeFilter = filtered.length;
+            
+            // Remove any excluded servers that somehow got through
+            const filteredOut = filtered.filter(s => {
+                if (!s || !s.id) return false;
+                const normalized = String(s.id).trim().toLowerCase();
+                return !excludeSet.has(normalized);
+            });
+            
+            if (filteredOut.length < filtered.length) {
+                const removed = filtered.length - filteredOut.length;
+                console.error(`[API] ERROR: Removed ${removed} excluded job ID(s) from response! This should not happen!`);
+                filtered = filteredOut;
+                serverIds = filtered.map(s => String(s.id).trim()).filter(id => id.length > 0);
+            }
+            
+            // Double-check and log if any excluded IDs are still present
             for (const serverId of serverIds) {
                 const normalized = String(serverId).trim().toLowerCase();
                 if (excludeSet.has(normalized)) {
-                    console.error(`[API] ERROR: Excluded job ID ${serverId} is in the response! This should not happen!`);
+                    console.error(`[API] CRITICAL ERROR: Excluded job ID ${serverId} is STILL in the response after filtering!`);
                 }
             }
         }
