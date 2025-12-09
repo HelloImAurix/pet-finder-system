@@ -501,13 +501,32 @@ function getFreshestServers(limit = 2000, excludeIds = []) {
         
         const jobIdStr = String(jobId).trim().toLowerCase();
         const serverIdStr = String(server.id).trim().toLowerCase();
+        const originalServerId = String(server.id).trim();
         
         // Filter out excluded servers (both blacklisted and request-excluded)
         // But don't remove request-excluded from cache - they're just filtered for this request
+        let isExcluded = false;
         if (allExcluded.has(jobIdStr) || allExcluded.has(serverIdStr)) {
             if (excludeSet.has(jobIdStr) || excludeSet.has(serverIdStr)) {
-                console.log(`[Cache] getFreshestServers: Filtered out excluded server: ${server.id} (mapId: ${jobId})`);
+                console.log(`[Cache] getFreshestServers: Filtered out excluded server: ${originalServerId} (mapId: ${jobId}, normalized: ${serverIdStr})`);
             }
+            isExcluded = true;
+        }
+        
+        // Double-check: if the original (non-normalized) ID is in exclude list, filter it out
+        if (!isExcluded) {
+            for (const excludeId of excludeIds) {
+                const excludeIdStr = String(excludeId).trim();
+                const excludeIdNormalized = excludeIdStr.toLowerCase();
+                if (originalServerId === excludeIdStr || jobIdStr === excludeIdNormalized || serverIdStr === excludeIdNormalized) {
+                    console.log(`[Cache] getFreshestServers: Filtered out excluded server (exact match): ${originalServerId}`);
+                    isExcluded = true;
+                    break;
+                }
+            }
+        }
+        
+        if (isExcluded) {
             filteredOutCount++;
             continue;
         }
@@ -629,3 +648,4 @@ module.exports = {
         return false;
     }
 };
+
