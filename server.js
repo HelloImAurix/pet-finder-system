@@ -515,6 +515,7 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         const exclude = req.query.exclude ? req.query.exclude.split(',') : [];
         
         jobIdFetcher.loadCache();
+        jobIdFetcher.cleanCache();
         const cacheInfo = jobIdFetcher.getCacheInfo();
         
         let servers = [];
@@ -528,13 +529,11 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         
         if (exclude.length > 0) {
             jobIdFetcher.removeVisitedServers(exclude);
+            jobIdFetcher.cleanCache();
         }
         
-        const almostFullServers = [];
-        const nearFullServers = [];
-        const otherServers = [];
+        const filtered = [];
         const now = Date.now();
-        
         for (const server of servers) {
             if (excludeSet.has(server.id)) continue;
             
@@ -543,65 +542,54 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
             if (players >= maxPlayers) continue;
             
             const serverAge = server.timestamp ? (now - server.timestamp) : 0;
-            if (serverAge > 180000) continue;
+            const isAlmostFull = players >= (maxPlayers - 1) && players < maxPlayers;
+            const isNearFull = players >= (maxPlayers - 2) && players < (maxPlayers - 1);
+            
+            if (isAlmostFull && serverAge > 15000) continue;
+            if (isNearFull && serverAge > 30000) continue;
+            if (serverAge > 60000) continue;
             
             if (players < maxPlayers) {
-                const isAlmostFull = players >= (maxPlayers - 1) && players < maxPlayers;
-                const isNearFull = players >= (maxPlayers - 2) && players < (maxPlayers - 1);
-                
-                if (isAlmostFull) {
-                    almostFullServers.push(server);
-                } else if (isNearFull) {
-                    nearFullServers.push(server);
-                } else {
-                    otherServers.push(server);
-                }
+                filtered.push(server);
+            }
+            
+            if (filtered.length >= limit && limit > 100) {
+                break;
             }
         }
-        
-        const filtered = [...almostFullServers, ...nearFullServers, ...otherServers];
         
         filtered.sort((a, b) => {
             const aPlayers = a.players || 0;
             const bPlayers = b.players || 0;
             const aMaxPlayers = a.maxPlayers || 8;
             const bMaxPlayers = b.maxPlayers || 8;
-            const aTimestamp = a.timestamp || 0;
-            const bTimestamp = b.timestamp || 0;
             
             const aAlmostFull = a.isAlmostFull || (aPlayers >= (aMaxPlayers - 1) && aPlayers < aMaxPlayers);
             const bAlmostFull = b.isAlmostFull || (bPlayers >= (bMaxPlayers - 1) && bPlayers < bMaxPlayers);
             const aNearFull = a.isNearFull || (aPlayers >= (aMaxPlayers - 2) && aPlayers < (aMaxPlayers - 1));
             const bNearFull = b.isNearFull || (bPlayers >= (bMaxPlayers - 2) && bPlayers < (bMaxPlayers - 1));
             
+            const aAge = a.timestamp ? (now - a.timestamp) : 999999;
+            const bAge = b.timestamp ? (now - b.timestamp) : 999999;
+            
             if (aAlmostFull && !bAlmostFull) return -1;
             if (!aAlmostFull && bAlmostFull) return 1;
-            
-            if (aAlmostFull && bAlmostFull) {
-                return bTimestamp - aTimestamp;
-            }
-            
             if (aNearFull && !bNearFull && !bAlmostFull) return -1;
             if (!aNearFull && bNearFull && !aAlmostFull) return 1;
             
-            if (aNearFull && bNearFull) {
-                if (aPlayers !== bPlayers) return bPlayers - aPlayers;
-                return bTimestamp - aTimestamp;
-            }
-            
             if (aPlayers !== bPlayers) return bPlayers - aPlayers;
             
-            return bTimestamp - aTimestamp;
+            return aAge - bAge;
         });
         
         const limited = filtered.slice(0, limit);
         
         const cacheAge = cacheInfo.lastUpdated ? (Date.now() - new Date(cacheInfo.lastUpdated).getTime()) : Infinity;
         const shouldRefresh = !isFetching && (
-            cacheInfo.count < 300 || 
-            cacheAge > 60000 ||
-            (cacheInfo.count < 500 && cacheAge > 30000) ||
-            (cacheInfo.count < 1000 && cacheAge > 45000)
+            cacheInfo.count < 200 || 
+            cacheAge > 30000 ||
+            (cacheInfo.count < 400 && cacheAge > 20000) ||
+            (cacheInfo.count < 600 && cacheAge > 30000)
         );
         
         if (shouldRefresh) {
@@ -613,6 +601,7 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
                 jobIdFetcher.cleanCache();
                 jobIdFetcher.fetchBulkJobIds()
                     .then(result => {
+                        jobIdFetcher.cleanCache();
                         jobIdFetcher.saveCache();
                         console.log(`[API] Cache refreshed: ${result.total} servers available`);
                         isFetching = false;
@@ -625,6 +614,8 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
                     });
             });
         }
+        
+        jobIdFetcher.cleanCache();
         
         res.json({
             success: true,
@@ -728,7 +719,7 @@ function startServer() {
                             jobIdFetcher.cleanCache();
                             jobIdFetcher.saveCache();
                         }
-                    }, 30 * 1000);
+                    }, 15 * 1000);
                     
                     setInterval(() => {
                         if (isFetching) {
@@ -737,10 +728,12 @@ function startServer() {
                         const cacheInfo = jobIdFetcher.getCacheInfo();
                         const cacheAge = cacheInfo.lastUpdated ? (Date.now() - new Date(cacheInfo.lastUpdated).getTime()) : Infinity;
                         
-                        if (cacheInfo.count < 500 || cacheAge > 90000) {
+                        if (cacheInfo.count < 300 || cacheAge > 45000) {
                             isFetching = true;
+                            jobIdFetcher.cleanCache();
                             jobIdFetcher.fetchBulkJobIds()
                                 .then(result => {
+                                    jobIdFetcher.cleanCache();
                                     jobIdFetcher.saveCache();
                                     console.log(`[API] Auto-refresh: ${result.total} servers available`);
                                     isFetching = false;
@@ -750,7 +743,7 @@ function startServer() {
                                     isFetching = false;
                                 });
                         }
-                    }, 90 * 1000);
+                    }, 45 * 1000);
                 });
             }
         });
