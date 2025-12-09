@@ -479,7 +479,7 @@ module.exports = {
                 return true;
             });
             
-            const sorted = valid
+            let sorted = valid
                 .sort((a, b) => {
                     const aObj = typeof a === 'object' && a !== null ? a : null;
                     const bObj = typeof b === 'object' && b !== null ? b : null;
