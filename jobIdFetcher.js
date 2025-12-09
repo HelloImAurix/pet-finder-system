@@ -4,140 +4,100 @@ const path = require('path');
 
 const PLACE_ID = parseInt(process.env.PLACE_ID, 10) || 109983668079237;
 const CACHE_FILE = path.join(__dirname, 'jobIds_cache.json');
+const USED_IDS_FILE = path.join(__dirname, 'used_job_ids.json');
 const MAX_JOB_IDS = parseInt(process.env.MAX_JOB_IDS || '2000', 10);
 const PAGES_TO_FETCH = parseInt(process.env.PAGES_TO_FETCH || '200', 10);
 const DELAY_BETWEEN_REQUESTS = parseInt(process.env.DELAY_BETWEEN_REQUESTS || '2000', 10);
 const MIN_PLAYERS = parseInt(process.env.MIN_PLAYERS || '1', 10);
 const JOB_ID_MAX_AGE_MS = parseInt(process.env.JOB_ID_MAX_AGE_MS || '180000', 10);
 const CACHE_CLEANUP_MAX_AGE_MS = parseInt(process.env.CACHE_CLEANUP_MAX_AGE_MS || '600000', 10);
-let jobIdCache = {
-    jobIds: [],
+
+// Server data structure: Map<jobId, serverData>
+const serverMap = new Map();
+// Used job IDs: Set<jobId> - persistent blacklist
+const usedJobIds = new Set();
+// Cache metadata
+let cacheMetadata = {
     lastUpdated: null,
     placeId: PLACE_ID,
     totalFetched: 0
 };
 
-const attemptedRemovals = new Set();
 let isSaving = false;
 let pendingSave = false;
 
+// Load used job IDs from persistent storage
+function loadUsedIds() {
+    try {
+        if (fs.existsSync(USED_IDS_FILE)) {
+            const data = fs.readFileSync(USED_IDS_FILE, 'utf8');
+            const parsed = JSON.parse(data);
+            if (Array.isArray(parsed)) {
+                parsed.forEach(id => {
+                    if (id && typeof id === 'string') {
+                        usedJobIds.add(id.trim());
+                    }
+                });
+                console.log(`[Cache] Loaded ${usedJobIds.size} used job IDs from blacklist`);
+            }
+        }
+    } catch (error) {
+        console.error('[Cache] Failed to load used IDs:', error.message);
+    }
+}
+
+// Save used job IDs to persistent storage
+function saveUsedIds() {
+    try {
+        const idsArray = Array.from(usedJobIds);
+        fs.writeFileSync(USED_IDS_FILE, JSON.stringify(idsArray, null, 2));
+    } catch (error) {
+        console.error('[Cache] Failed to save used IDs:', error.message);
+    }
+}
+
+// Load cache from file
 function loadCache() {
     try {
         if (fs.existsSync(CACHE_FILE)) {
             const data = fs.readFileSync(CACHE_FILE, 'utf8');
             const parsed = JSON.parse(data);
-            if (parsed && Array.isArray(parsed.jobIds)) {
-                const seenIds = new Set();
-                const deduplicated = [];
+            
+            if (parsed && parsed.servers && Array.isArray(parsed.servers)) {
+                serverMap.clear();
+                let loaded = 0;
                 
-                for (const item of parsed.jobIds) {
-                    let id;
-                    if (typeof item === 'string' || typeof item === 'number') {
-                        id = String(item).trim();
-                    } else if (typeof item === 'object' && item !== null && item.id) {
-                        id = String(item.id).trim();
-                    } else {
-                        continue;
-                    }
+                for (const server of parsed.servers) {
+                    if (!server || !server.id) continue;
+                    const jobId = String(server.id).trim();
+                    if (!jobId || usedJobIds.has(jobId)) continue;
                     
-                    if (id && !seenIds.has(id)) {
-                        seenIds.add(id);
-                        deduplicated.push(item);
-                    }
+                    serverMap.set(jobId, {
+                        id: jobId,
+                        timestamp: server.timestamp || Date.now(),
+                        players: server.players || 0,
+                        maxPlayers: server.maxPlayers || 8,
+                        priority: server.priority || 0
+                    });
+                    loaded++;
                 }
                 
-                jobIdCache = {
-                    ...parsed,
-                    jobIds: deduplicated
-                };
-                
-                const removedCount = parsed.jobIds.length - deduplicated.length;
-                if (removedCount > 0) {
-                    console.log(`[Cache] Loaded ${deduplicated.length} servers (removed ${removedCount} duplicates)`);
-                } else {
-                    console.log(`[Cache] Loaded ${deduplicated.length} servers`);
+                if (parsed.metadata) {
+                    cacheMetadata = { ...cacheMetadata, ...parsed.metadata };
                 }
+                
+                console.log(`[Cache] Loaded ${loaded} servers (skipped ${parsed.servers.length - loaded} used/invalid)`);
                 return true;
-            } else {
-                jobIdCache = {
-                    jobIds: [],
-                    lastUpdated: null,
-                    placeId: PLACE_ID,
-                    totalFetched: 0
-                };
             }
         }
     } catch (error) {
         console.error('[Cache] Failed to load cache:', error.message);
-        jobIdCache = {
-            jobIds: [],
-            lastUpdated: null,
-            placeId: PLACE_ID,
-            totalFetched: 0
-        };
     }
     return false;
 }
 
-function cleanCache() {
-    if (Array.isArray(jobIdCache.jobIds)) {
-        const originalLength = jobIdCache.jobIds.length;
-        const now = Date.now();
-        let expiredCount = 0;
-        let fullCount = 0;
-        let invalidCount = 0;
-        
-        jobIdCache.jobIds = jobIdCache.jobIds.filter(item => {
-            if (typeof item === 'string' || typeof item === 'number') {
-                if (item === null || item === undefined || item === '' || String(item).trim() === '') {
-                    invalidCount++;
-                    return false;
-                }
-                return true;
-            }
-            if (typeof item === 'object' && item !== null) {
-                if (!item.id || item.id === null || item.id === undefined || String(item.id).trim() === '') {
-                    invalidCount++;
-                    return false;
-                }
-                const timestamp = item.timestamp;
-                if (timestamp === undefined || timestamp === null) {
-                    invalidCount++;
-                    return false;
-                }
-                if (typeof timestamp === 'number' && (isNaN(timestamp) || timestamp <= 0)) {
-                    invalidCount++;
-                    return false;
-                }
-                const age = now - (timestamp || 0);
-                if (age >= CACHE_CLEANUP_MAX_AGE_MS) {
-                    expiredCount++;
-                    return false;
-                }
-                const players = item.players || 0;
-                const maxPlayers = item.maxPlayers || 8;
-                if (players >= maxPlayers) {
-                    fullCount++;
-                    return false;
-                }
-                if (players < 0 || players > maxPlayers) {
-                    invalidCount++;
-                    return false;
-                }
-                
-                return true;
-            }
-            invalidCount++;
-            return false;
-        });
-        
-        if (expiredCount > 0 || fullCount > 0 || invalidCount > 0) {
-            console.log(`[Cache] Cleaned: ${expiredCount} expired, ${fullCount} full, ${invalidCount} invalid servers removed`);
-        }
-    }
-}
-
-function saveCache(shouldClean) {
+// Save cache to file
+function saveCache(shouldClean = false) {
     if (isSaving) {
         pendingSave = true;
         return false;
@@ -151,34 +111,22 @@ function saveCache(shouldClean) {
             cleanCache();
         }
         
-        const seenIds = new Set();
-        const deduplicated = [];
-        
-        for (const item of jobIdCache.jobIds) {
-            let id;
-            if (typeof item === 'string' || typeof item === 'number') {
-                id = String(item).trim();
-            } else if (typeof item === 'object' && item !== null && item.id) {
-                id = String(item.id).trim();
-            } else {
-                continue;
-            }
-            
-            if (id && !seenIds.has(id)) {
-                seenIds.add(id);
-                deduplicated.push(item);
-            }
+        // Remove used job IDs from cache before saving
+        for (const usedId of usedJobIds) {
+            serverMap.delete(usedId);
         }
         
-        const removedCount = jobIdCache.jobIds.length - deduplicated.length;
-        if (removedCount > 0) {
-            console.log(`[Cache] Removed ${removedCount} duplicate servers before saving`);
-        }
+        const serversArray = Array.from(serverMap.values());
+        cacheMetadata.lastUpdated = new Date().toISOString();
+        cacheMetadata.totalFetched = serversArray.length;
         
-        jobIdCache.jobIds = deduplicated;
-        jobIdCache.lastUpdated = new Date().toISOString();
-        fs.writeFileSync(CACHE_FILE, JSON.stringify(jobIdCache, null, 2));
-        console.log(`[Cache] Saved ${jobIdCache.jobIds.length} servers to cache`);
+        const cacheData = {
+            servers: serversArray,
+            metadata: cacheMetadata
+        };
+        
+        fs.writeFileSync(CACHE_FILE, JSON.stringify(cacheData, null, 2));
+        console.log(`[Cache] Saved ${serversArray.length} servers to cache`);
         
         isSaving = false;
         if (pendingSave) {
@@ -195,15 +143,69 @@ function saveCache(shouldClean) {
     }
 }
 
+// Clean cache: remove expired, full, and invalid servers
+function cleanCache() {
+    const now = Date.now();
+    let expiredCount = 0;
+    let fullCount = 0;
+    let invalidCount = 0;
+    
+    for (const [jobId, server] of serverMap.entries()) {
+        if (!server || !server.id || usedJobIds.has(jobId)) {
+            serverMap.delete(jobId);
+            invalidCount++;
+            continue;
+        }
+        
+        const age = now - (server.timestamp || 0);
+        if (age >= CACHE_CLEANUP_MAX_AGE_MS) {
+            serverMap.delete(jobId);
+            expiredCount++;
+            continue;
+        }
+        
+        const players = server.players || 0;
+        const maxPlayers = server.maxPlayers || 8;
+        if (players >= maxPlayers || players < 0 || players > maxPlayers) {
+            serverMap.delete(jobId);
+            fullCount++;
+            continue;
+        }
+    }
+    
+    if (expiredCount > 0 || fullCount > 0 || invalidCount > 0) {
+        console.log(`[Cache] Cleaned: ${expiredCount} expired, ${fullCount} full, ${invalidCount} invalid servers removed`);
+    }
+}
+
+// Mark job IDs as used (add to blacklist)
+function markAsUsed(jobIds) {
+    if (!Array.isArray(jobIds) || jobIds.length === 0) return 0;
+    
+    let added = 0;
+    for (const jobId of jobIds) {
+        const id = String(jobId).trim();
+        if (id && !usedJobIds.has(id)) {
+            usedJobIds.add(id);
+            serverMap.delete(id);
+            added++;
+        }
+    }
+    
+    if (added > 0) {
+        saveUsedIds();
+        console.log(`[Cache] Marked ${added} job ID(s) as used (total blacklisted: ${usedJobIds.size})`);
+    }
+    
+    return added;
+}
+
+// Make HTTP request
 function makeRequest(url) {
     return new Promise((resolve, reject) => {
         const request = https.get(url, (res) => {
             let data = '';
-            
-            res.on('data', (chunk) => {
-                data += chunk;
-            });
-            
+            res.on('data', (chunk) => { data += chunk; });
             res.on('end', () => {
                 if (res.statusCode === 200) {
                     try {
@@ -230,6 +232,7 @@ function makeRequest(url) {
     });
 }
 
+// Fetch a single page of servers
 async function fetchPage(cursor = null, retryCount = 0, sortOrder = 'Desc') {
     let url = `https://games.roblox.com/v1/games/${PLACE_ID}/servers/Public?sortOrder=${sortOrder}&limit=100&excludeFullGames=true`;
     if (cursor) {
@@ -244,76 +247,47 @@ async function fetchPage(cursor = null, retryCount = 0, sortOrder = 'Desc') {
             if (retryCount < 3) {
                 const backoffDelay = Math.min(10000 * Math.pow(2, retryCount), 60000);
                 await new Promise(resolve => setTimeout(resolve, backoffDelay));
-                return fetchPage(cursor, retryCount + 1);
-            } else {
-                return null;
+                return fetchPage(cursor, retryCount + 1, sortOrder);
             }
         }
-        if (error.message.includes('timeout')) {
-            if (retryCount < 2) {
-                await new Promise(resolve => setTimeout(resolve, 2000));
-                return fetchPage(cursor, retryCount + 1);
-            }
+        if (error.message.includes('timeout') && retryCount < 2) {
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            return fetchPage(cursor, retryCount + 1, sortOrder);
         }
         return null;
     }
 }
 
+// Fetch bulk job IDs from Roblox API
 async function fetchBulkJobIds() {
     console.log(`[Fetch] Starting bulk fetch: target ${MAX_JOB_IDS} servers, up to ${PAGES_TO_FETCH} pages`);
     
     const now = Date.now();
     const maxAge = JOB_ID_MAX_AGE_MS;
-    const beforeCleanup = jobIdCache.jobIds.length;
-    const existingValidIds = new Set();
-    
-    const validExistingServers = jobIdCache.jobIds.filter(item => {
-        let id;
-        if (typeof item === 'string' || typeof item === 'number') {
-            id = String(item);
-        } else if (typeof item === 'object' && item !== null && item.id) {
-            const age = now - (item.timestamp || 0);
-            if (age >= maxAge) return false;
-            id = String(item.id);
-        } else {
-            return false;
-        }
-        if (existingValidIds.has(id)) return false;
-        existingValidIds.add(id);
-        return true;
-    });
-    
-    const expiredCount = beforeCleanup - validExistingServers.length;
-    if (expiredCount > 0) {
-        console.log(`[Fetch] Removed ${expiredCount} expired servers from cache`);
-    }
-    console.log(`[Fetch] Starting with ${validExistingServers.length} valid cached servers`);
-    jobIdCache.jobIds = [...validExistingServers];
-    const existingJobIds = new Set(existingValidIds);
-    let cursor = null;
     let pagesFetched = 0;
     let totalAdded = 0;
     let totalScanned = 0;
-    let totalFiltered = 0;
     let lastSaveCount = 0;
     
-    while (pagesFetched < PAGES_TO_FETCH && jobIdCache.jobIds.length < MAX_JOB_IDS) {
+    // Clean expired servers first
+    for (const [jobId, server] of serverMap.entries()) {
+        const age = now - (server.timestamp || 0);
+        if (age >= maxAge || usedJobIds.has(jobId)) {
+            serverMap.delete(jobId);
+        }
+    }
+    
+    console.log(`[Fetch] Starting with ${serverMap.size} valid cached servers`);
+    
+    let cursor = null;
+    while (pagesFetched < PAGES_TO_FETCH && serverMap.size < MAX_JOB_IDS) {
         if (pagesFetched > 0) {
             const delay = pagesFetched % 3 === 0 ? DELAY_BETWEEN_REQUESTS : 1000;
             await new Promise(resolve => setTimeout(resolve, delay));
         }
         
-        let data;
-        try {
-            const sortOrder = pagesFetched % 10 < 7 ? 'Desc' : 'Asc';
-            data = await fetchPage(cursor, 0, sortOrder);
-        } catch (error) {
-            if (error.message.includes('429') || error.message.includes('Too many requests')) {
-                await new Promise(resolve => setTimeout(resolve, 30000));
-            }
-            pagesFetched++;
-            continue;
-        }
+        const sortOrder = pagesFetched % 10 < 7 ? 'Desc' : 'Asc';
+        const data = await fetchPage(cursor, 0, sortOrder);
         
         if (!data || !data.data || data.data.length === 0) {
             cursor = data && data.nextPageCursor ? data.nextPageCursor : null;
@@ -323,32 +297,21 @@ async function fetchBulkJobIds() {
         }
         
         let pageAdded = 0;
-        let pageFiltered = 0;
-        let filterStats = { full: 0, private: 0, invalid: 0, duplicate: 0, tooMany: 0, lowPlayers: 0 };
-        
         for (const server of data.data) {
             totalScanned++;
             const jobId = server.id;
             const players = server.playing || 0;
             const maxPlayers = server.maxPlayers || 6;
             
+            if (!jobId || usedJobIds.has(jobId) || serverMap.has(jobId)) {
+                continue;
+            }
+            
             const isPrivateServer = (server.accessCode !== null && server.accessCode !== undefined) ||
                                    (server.PrivateServerId !== null && server.PrivateServerId !== undefined) ||
                                    (server.privateServerId !== null && server.privateServerId !== undefined);
             
-            if (!jobId || existingJobIds.has(jobId) || jobIdCache.jobIds.length >= MAX_JOB_IDS) {
-                if (!jobId) filterStats.invalid++;
-                else if (existingJobIds.has(jobId)) filterStats.duplicate++;
-                else filterStats.tooMany++;
-                pageFiltered++;
-                continue;
-            }
-            
             if (players >= maxPlayers || isPrivateServer || (players > 0 && players < MIN_PLAYERS)) {
-                if (players >= maxPlayers) filterStats.full++;
-                else if (isPrivateServer) filterStats.private++;
-                else filterStats.lowPlayers++;
-                pageFiltered++;
                 continue;
             }
             
@@ -357,14 +320,13 @@ async function fetchBulkJobIds() {
                 const isNearFull = players >= (maxPlayers - 2) && players < (maxPlayers - 1);
                 const priority = isAlmostFull ? 3 : (isNearFull ? 2 : (players > 0 ? 1 : 0));
                 
-                jobIdCache.jobIds.push({
+                serverMap.set(jobId, {
                     id: jobId,
                     timestamp: Date.now(),
                     players: players,
                     maxPlayers: maxPlayers,
                     priority: priority
                 });
-                existingJobIds.add(jobId);
                 pageAdded++;
                 totalAdded++;
             }
@@ -373,97 +335,94 @@ async function fetchBulkJobIds() {
         pagesFetched++;
         
         if (pagesFetched % 10 === 0 || pageAdded > 0) {
-            const filterDetails = [];
-            if (filterStats.full > 0) filterDetails.push(`${filterStats.full} full`);
-            if (filterStats.private > 0) filterDetails.push(`${filterStats.private} private`);
-            if (filterStats.duplicate > 0) filterDetails.push(`${filterStats.duplicate} duplicate`);
-            const filterSummary = filterDetails.length > 0 ? ` (filtered: ${filterDetails.join(', ')})` : '';
-            console.log(`[Fetch] Page ${pagesFetched}: +${pageAdded} servers (total: ${jobIdCache.jobIds.length}/${MAX_JOB_IDS})${filterSummary}`);
+            console.log(`[Fetch] Page ${pagesFetched}: +${pageAdded} servers (total: ${serverMap.size}/${MAX_JOB_IDS})`);
         }
         
-        const currentCount = jobIdCache.jobIds.length;
-        if (currentCount - lastSaveCount >= 100) {
-            const seenIds = new Set();
-            const deduplicated = [];
-            
-            for (const item of jobIdCache.jobIds) {
-                let id;
-                if (typeof item === 'string' || typeof item === 'number') {
-                    id = String(item).trim();
-                } else if (typeof item === 'object' && item !== null && item.id) {
-                    id = String(item.id).trim();
-                } else {
-                    continue;
-                }
-                
-                if (id && !seenIds.has(id)) {
-                    seenIds.add(id);
-                    deduplicated.push(item);
-                }
-            }
-            
-            jobIdCache.jobIds = deduplicated;
-            const deduplicatedCount = jobIdCache.jobIds.length;
-            if (currentCount !== deduplicatedCount) {
-                console.log(`[Cache] Removed ${currentCount - deduplicatedCount} duplicate servers before saving`);
-            }
-            console.log(`[Cache] Saving cache: ${deduplicatedCount} servers (incremental save every 100)`);
-            jobIdCache.totalFetched = deduplicatedCount;
+        if (serverMap.size - lastSaveCount >= 100) {
+            console.log(`[Cache] Saving cache: ${serverMap.size} servers (incremental save every 100)`);
             saveCache(false);
-            lastSaveCount = deduplicatedCount;
+            lastSaveCount = serverMap.size;
         }
         
         cursor = data.nextPageCursor;
-        
-        if (!cursor) {
+        if (!cursor || (serverMap.size >= MAX_JOB_IDS && pagesFetched >= 50)) {
             break;
         }
-        
-        if (jobIdCache.jobIds.length >= MAX_JOB_IDS && pagesFetched >= 50) {
-            break;
-        }
-        
-        filterStats = { full: 0, private: 0, invalid: 0, duplicate: 0, tooMany: 0, lowPlayers: 0 };
     }
     
-    jobIdCache.jobIds.sort((a, b) => {
-        const aObj = typeof a === 'object' && a !== null ? a : null;
-        const bObj = typeof b === 'object' && b !== null ? b : null;
-        const aPriority = aObj ? (aObj.priority || 0) : 0;
-        const bPriority = bObj ? (bObj.priority || 0) : 0;
-        if (aPriority !== bPriority) return bPriority - aPriority;
-        
-        const aPlayers = aObj ? (aObj.players || 0) : 0;
-        const bPlayers = bObj ? (bObj.players || 0) : 0;
-        if (aPlayers !== bPlayers) return bPlayers - aPlayers;
-        
-        const tsA = aObj ? (aObj.timestamp || 0) : Date.now();
-        const tsB = bObj ? (bObj.timestamp || 0) : Date.now();
-        return tsB - tsA;
-    });
-    
-    if (jobIdCache.jobIds.length > MAX_JOB_IDS) {
-        jobIdCache.jobIds = jobIdCache.jobIds.slice(0, MAX_JOB_IDS);
-    }
-    
-    jobIdCache.totalFetched = jobIdCache.jobIds.length;
-    
-    const keptFromOld = validExistingServers.length;
-    console.log(`[Fetch] Complete: ${jobIdCache.jobIds.length}/${MAX_JOB_IDS} servers cached (kept ${keptFromOld}, added ${totalAdded}, scanned ${totalScanned})`);
+    cacheMetadata.totalFetched = serverMap.size;
+    console.log(`[Fetch] Complete: ${serverMap.size}/${MAX_JOB_IDS} servers cached (added ${totalAdded}, scanned ${totalScanned})`);
     
     return {
-        total: jobIdCache.jobIds.length,
+        total: serverMap.size,
         added: totalAdded,
-        filtered: totalFiltered,
         scanned: totalScanned
     };
 }
 
+// Get freshest servers (excluding used ones)
+function getFreshestServers(limit = 2000, excludeIds = []) {
+    const now = Date.now();
+    const maxAge = JOB_ID_MAX_AGE_MS;
+    const excludeSet = new Set(excludeIds.map(id => String(id).trim()));
+    
+    // Combine excludeIds with usedJobIds
+    const allExcluded = new Set([...usedJobIds, ...excludeSet]);
+    
+    const validServers = [];
+    for (const [jobId, server] of serverMap.entries()) {
+        if (allExcluded.has(jobId)) continue;
+        
+        const age = now - (server.timestamp || 0);
+        if (age >= maxAge) continue;
+        
+        const players = server.players || 0;
+        const maxPlayers = server.maxPlayers || 8;
+        if (players >= maxPlayers || players < 0 || players > maxPlayers) continue;
+        
+        const isAlmostFull = players >= (maxPlayers - 1) && players < maxPlayers;
+        const isNearFull = players >= (maxPlayers - 2) && players < (maxPlayers - 1);
+        if (isAlmostFull && age > 60000) continue;
+        if (isNearFull && age > 90000) continue;
+        if (age > 180000) continue;
+        
+        validServers.push(server);
+    }
+    
+    // Sort by priority, then players, then age
+    validServers.sort((a, b) => {
+        if (a.priority !== b.priority) return b.priority - a.priority;
+        if (a.players !== b.players) return b.players - a.players;
+        const aAge = now - (a.timestamp || 0);
+        const bAge = now - (b.timestamp || 0);
+        return aAge - bAge;
+    });
+    
+    const result = validServers.slice(0, limit).map(server => ({
+        id: server.id,
+        players: server.players,
+        maxPlayers: server.maxPlayers,
+        timestamp: server.timestamp,
+        isAlmostFull: server.players >= (server.maxPlayers - 1) && server.players < server.maxPlayers,
+        isNearFull: server.players >= (server.maxPlayers - 2) && server.players < (server.maxPlayers - 1),
+        priority: server.priority
+    }));
+    
+    if (result.length > 0) {
+        const excludedCount = allExcluded.size;
+        console.log(`[Cache] getFreshestServers: Returning ${result.length} servers (excluded ${excludedCount} IDs) (first 5: ${result.slice(0, 5).map(s => s.id).join(', ')})`);
+    }
+    
+    return result;
+}
+
+// Initialize: load used IDs and cache
+loadUsedIds();
+loadCache();
+
+// Main function for standalone execution
 async function main() {
-    loadCache();
-    
     const result = await fetchBulkJobIds();
-    
     if (!saveCache()) {
         console.error('[Error] Failed to save cache!');
         process.exit(1);
@@ -477,287 +436,32 @@ if (require.main === module) {
     });
 }
 
+// Module exports
 module.exports = {
     fetchBulkJobIds,
     loadCache,
     saveCache,
     cleanCache,
-    getJobIds: () => {
-        try {
-            const ids = jobIdCache.jobIds || [];
-            return ids.map(item => {
-                if (typeof item === 'string' || typeof item === 'number') return item;
-                if (typeof item === 'object' && item !== null && item.id) return item.id;
-                return item;
-            });
-        } catch (error) {
-            console.error('[Cache] Error getting job IDs:', error.message);
-            return [];
-        }
-    },
-    getFreshestJobIds: (limit = 1000) => {
-        try {
-            const ids = jobIdCache.jobIds || [];
-            const now = Date.now();
-            const maxAge = JOB_ID_MAX_AGE_MS;
-            
-            const sorted = ids
-                .filter(item => {
-                    if (typeof item === 'string' || typeof item === 'number') {
-                        return true;
-                    }
-                    if (typeof item === 'object' && item !== null && item.id) {
-                        const age = now - (item.timestamp || 0);
-                        return age < maxAge;
-                    }
-                    return false;
-                })
-                .sort((a, b) => {
-                    const tsA = typeof a === 'object' ? (a.timestamp || 0) : Date.now();
-                    const tsB = typeof b === 'object' ? (b.timestamp || 0) : Date.now();
-                    return tsB - tsA;
-                })
-                .slice(0, limit)
-                .map(item => typeof item === 'object' ? item.id : item);
-            
-            const beforeCleanup = jobIdCache.jobIds.length;
-            jobIdCache.jobIds = jobIdCache.jobIds.filter(item => {
-                if (typeof item === 'string' || typeof item === 'number') return true;
-                if (typeof item === 'object' && item !== null) {
-                    const age = now - (item.timestamp || 0);
-                    return age < maxAge;
-                }
-                return false;
-            });
-            
-            
-            return sorted;
-        } catch (error) {
-            console.error('[Cache] Error getting freshest job IDs:', error.message);
-            return [];
-        }
-    },
-    getFreshestServers: (limit = 2000, excludeIds = [], updateCache = false) => {
-        try {
-            const ids = jobIdCache.jobIds || [];
-            const now = Date.now();
-            const maxAge = JOB_ID_MAX_AGE_MS;
-            const excludeSet = excludeIds.length > 0 ? new Set(excludeIds.map(id => String(id).trim())) : new Set();
-            
-            const valid = ids.filter(item => {
-                let itemId;
-                if (typeof item === 'string' || typeof item === 'number') {
-                    itemId = String(item).trim();
-                    if (excludeSet.has(itemId)) return false;
-                    return true;
-                }
-                if (typeof item !== 'object' || !item || !item.id) return false;
-                
-                itemId = String(item.id).trim();
-                if (excludeSet.has(itemId)) return false;
-                
-                const age = now - (item.timestamp || 0);
-                if (age >= maxAge) return false;
-                
-                const players = item.players || 0;
-                const maxPlayers = item.maxPlayers || 8;
-                if (players >= maxPlayers || players < 0 || players > maxPlayers) return false;
-                
-                const isAlmostFull = players >= (maxPlayers - 1) && players < maxPlayers;
-                const isNearFull = players >= (maxPlayers - 2) && players < (maxPlayers - 1);
-                if (isAlmostFull && age > 60000) return false;
-                if (isNearFull && age > 90000) return false;
-                if (age > 180000) return false;
-                
-                return true;
-            });
-            
-            if (updateCache && valid.length < ids.length) {
-                jobIdCache.jobIds = valid;
-                console.log(`[Cache] Updated cache with valid servers: ${valid.length} servers (removed ${ids.length - valid.length} invalid/excluded)`);
-            }
-            
-            let sorted = valid
-                .sort((a, b) => {
-                    const aObj = typeof a === 'object' && a !== null ? a : null;
-                    const bObj = typeof b === 'object' && b !== null ? b : null;
-                    const aPriority = aObj ? (aObj.priority || 0) : 0;
-                    const bPriority = bObj ? (bObj.priority || 0) : 0;
-                    if (aPriority !== bPriority) return bPriority - aPriority;
-                    
-                    const aPlayers = aObj ? (aObj.players || 0) : 0;
-                    const bPlayers = bObj ? (bObj.players || 0) : 0;
-                    const aMaxPlayers = aObj ? (aObj.maxPlayers || 8) : 8;
-                    const bMaxPlayers = bObj ? (bObj.maxPlayers || 8) : 8;
-                    
-                    const aAlmostFull = aPlayers >= (aMaxPlayers - 1) && aPlayers < aMaxPlayers;
-                    const bAlmostFull = bPlayers >= (bMaxPlayers - 1) && bPlayers < bMaxPlayers;
-                    const aNearFull = aPlayers >= (aMaxPlayers - 2) && aPlayers < (aMaxPlayers - 1);
-                    const bNearFull = bPlayers >= (bMaxPlayers - 2) && bPlayers < (bMaxPlayers - 1);
-                    
-                    if (aAlmostFull && !bAlmostFull) return -1;
-                    if (!aAlmostFull && bAlmostFull) return 1;
-                    if (aNearFull && !bNearFull && !bAlmostFull) return -1;
-                    if (!aNearFull && bNearFull && !aAlmostFull) return 1;
-                    if (aPlayers !== bPlayers) return bPlayers - aPlayers;
-                    
-                    const tsA = aObj ? (aObj.timestamp || 0) : Date.now();
-                    const tsB = bObj ? (bObj.timestamp || 0) : Date.now();
-                    return (now - tsA) - (now - tsB);
-                })
-                .slice(0, limit)
-                .map(item => {
-                    if (typeof item === 'object' && item !== null) {
-                        const players = item.players || 0;
-                        const maxPlayers = item.maxPlayers || 8;
-                        return {
-                            id: item.id.toString(),
-                            players: players,
-                            maxPlayers: maxPlayers,
-                            timestamp: item.timestamp || Date.now(),
-                            isAlmostFull: players >= (maxPlayers - 1) && players < maxPlayers,
-                            isNearFull: players >= (maxPlayers - 2) && players < (maxPlayers - 1),
-                            priority: item.priority || (players >= (maxPlayers - 1) ? 3 : (players >= (maxPlayers - 2) ? 2 : (players > 0 ? 1 : 0)))
-                        };
-                    }
-                    return {
-                        id: item.toString(),
-                        players: 0,
-                        maxPlayers: 8,
-                        timestamp: Date.now(),
-                        isAlmostFull: false
-                    };
-                });
-            
-            if (excludeIds.length > 0 && sorted.length > 0) {
-                const beforeExclude = sorted.length;
-                const excludeSet = new Set(excludeIds.map(id => String(id).trim()));
-                sorted = sorted.filter(server => !excludeSet.has(server.id));
-                if (beforeExclude !== sorted.length) {
-                    console.log(`[Cache] getFreshestServers: Filtered out ${beforeExclude - sorted.length} excluded servers`);
-                }
-            }
-            
-            if (sorted.length > 0) {
-                const excludedCount = excludeIds.length;
-                console.log(`[Cache] getFreshestServers: Returning ${sorted.length} servers (excluded ${excludedCount} IDs) (first 5: ${sorted.slice(0, 5).map(s => s.id).join(', ')})`);
-            }
-            return sorted;
-        } catch (error) {
-            console.error('[Cache] Error getting freshest servers:', error.message);
-            return [];
-        }
-    },
-    getCacheInfo: () => {
-        try {
-            return {
-                count: (jobIdCache.jobIds || []).length,
-                lastUpdated: jobIdCache.lastUpdated || null,
-                placeId: jobIdCache.placeId || PLACE_ID
-            };
-        } catch (error) {
-            console.error('[Cache] Error getting cache info:', error.message);
-            return {
-                count: 0,
-                lastUpdated: null,
-                placeId: PLACE_ID
-            };
-        }
-    },
+    getFreshestServers,
+    markAsUsed,
+    getCacheInfo: () => ({
+        count: serverMap.size,
+        lastUpdated: cacheMetadata.lastUpdated,
+        placeId: cacheMetadata.placeId,
+        usedCount: usedJobIds.size
+    }),
     removeVisitedServers: (visitedIds) => {
-        try {
-            if (!Array.isArray(visitedIds) || visitedIds.length === 0) return 0;
-            const visitedSet = new Set(visitedIds.map(id => String(id).trim()).filter(id => id.length > 0));
-            if (visitedSet.size === 0) return 0;
-            
-            const beforeCount = jobIdCache.jobIds.length;
-            const removedIds = [];
-            
-            jobIdCache.jobIds = jobIdCache.jobIds.filter(item => {
-                let itemId;
-                if (typeof item === 'string' || typeof item === 'number') {
-                    itemId = String(item).trim();
-                } else if (typeof item === 'object' && item !== null && item.id) {
-                    itemId = String(item.id).trim();
-                } else {
-                    return true;
-                }
-                
-                if (visitedSet.has(itemId)) {
-                    removedIds.push(itemId);
-                    return false;
-                }
-                return true;
-            });
-            
-            const removed = beforeCount - jobIdCache.jobIds.length;
-            if (removed > 0) {
-                console.log(`[Cache] Removed ${removed} visited server(s) from cache (${visitedSet.size} requested): ${removedIds.slice(0, 5).join(', ')}${removedIds.length > 5 ? '...' : ''}`);
-                removedIds.forEach(id => attemptedRemovals.delete(id));
-            } else if (visitedSet.size > 0) {
-                const newAttempts = Array.from(visitedSet).filter(id => !attemptedRemovals.has(id));
-                if (newAttempts.length > 0) {
-                    console.log(`[Cache] Attempted to remove ${newAttempts.length} job ID(s) but none were found (already removed or never cached): ${newAttempts.slice(0, 3).join(', ')}${newAttempts.length > 3 ? '...' : ''}`);
-                    newAttempts.forEach(id => attemptedRemovals.add(id));
-                }
-            }
-            return removed;
-        } catch (error) {
-            console.error('[Cache] Error removing visited servers:', error.message);
-            return 0;
-        }
-    },
-    updateCacheWithValidServers: (validServerIds) => {
-        try {
-            if (!Array.isArray(validServerIds) || validServerIds.length === 0) return 0;
-            const validSet = new Set(validServerIds.map(id => String(id).trim()));
-            const beforeCount = jobIdCache.jobIds.length;
-            
-            const validServers = jobIdCache.jobIds.filter(item => {
-                let itemId;
-                if (typeof item === 'string' || typeof item === 'number') {
-                    itemId = String(item).trim();
-                } else if (typeof item === 'object' && item !== null && item.id) {
-                    itemId = String(item.id).trim();
-                } else {
-                    return false;
-                }
-                return validSet.has(itemId);
-            });
-            
-            jobIdCache.jobIds = validServers;
-            const removed = beforeCount - validServers.length;
-            if (removed > 0) {
-                console.log(`[Cache] Updated cache with valid servers: ${validServers.length} servers (removed ${removed} invalid/excluded)`);
-            }
-            return removed;
-        } catch (error) {
-            console.error('[Cache] Error updating cache with valid servers:', error.message);
-            return 0;
-        }
+        return markAsUsed(visitedIds);
     },
     markServerAsFull: (serverId) => {
-        try {
-            if (!serverId) return false;
-            const serverIdStr = String(serverId);
-            const beforeCount = jobIdCache.jobIds.length;
-            
-            jobIdCache.jobIds = jobIdCache.jobIds.filter(item => {
-                const itemId = typeof item === 'object' && item !== null ? String(item.id) : String(item);
-                if (itemId === serverIdStr) {
-                    const players = typeof item === 'object' && item !== null ? (item.players || 0) : 0;
-                    const maxPlayers = typeof item === 'object' && item !== null ? (item.maxPlayers || 8) : 8;
-                    if (players >= maxPlayers) {
-                        return false;
-                    }
-                }
+        const id = String(serverId).trim();
+        if (id && serverMap.has(id)) {
+            const server = serverMap.get(id);
+            if (server && server.players >= server.maxPlayers) {
+                serverMap.delete(id);
                 return true;
-            });
-            
-            return beforeCount !== jobIdCache.jobIds.length;
-        } catch (error) {
-            console.error('[Cache] Error marking server as full:', error.message);
-            return false;
+            }
         }
+        return false;
     }
 };
