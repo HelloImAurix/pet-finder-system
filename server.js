@@ -538,13 +538,6 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         try {
             const requestLimit = Math.max(limit * 5, 500);
             servers = jobIdFetcher.getFreshestServers(requestLimit, excludeList) || [];
-            if (excludeList.length > 0) {
-                const cacheAfterRemoval = jobIdFetcher.getCacheInfo();
-                if (cacheAfterRemoval.count < cacheInfo.count) {
-                    jobIdFetcher.saveCache(false);
-                    console.log(`[API] Cache updated after getFreshestServers: ${cacheAfterRemoval.count} servers remaining`);
-                }
-            }
         } catch (error) {
             console.error('[API] Error getting freshest servers:', error.message);
         }
