@@ -519,65 +519,24 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         
         const cacheInfo = jobIdFetcher.getCacheInfo();
         
+        // Mark excluded job IDs as used (permanently blacklist them)
         if (excludeList.length > 0) {
-            const cacheBefore = jobIdFetcher.getCacheInfo();
-            const removedCount = jobIdFetcher.removeVisitedServers(excludeList);
-            if (removedCount > 0) {
-                console.log(`[API] Removed ${removedCount} visited server(s) from cache (was ${cacheBefore.count}, now ${cacheBefore.count - removedCount})`);
-            }
-            const saveResult = jobIdFetcher.saveCache(false);
-            if (saveResult) {
-                const cacheAfter = jobIdFetcher.getCacheInfo();
-                if (removedCount > 0) {
-                    console.log(`[API] Cache saved: ${cacheAfter.count} servers remaining`);
-                }
+            const markedCount = jobIdFetcher.markAsUsed(excludeList);
+            if (markedCount > 0) {
+                console.log(`[API] Marked ${markedCount} excluded job ID(s) as used (total blacklisted: ${cacheInfo.usedCount})`);
             }
         }
         
         let servers = [];
         try {
             const requestLimit = Math.max(limit * 5, 500);
-            servers = jobIdFetcher.getFreshestServers(requestLimit, excludeList, true) || [];
+            servers = jobIdFetcher.getFreshestServers(requestLimit, excludeList) || [];
         } catch (error) {
             console.error('[API] Error getting freshest servers:', error.message);
         }
         
-        const now = Date.now();
-        const filtered = servers
-            .filter(server => {
-                if (excludeSet.has(server.id)) {
-                    return false;
-                }
-                const players = server.players || 0;
-                const maxPlayers = server.maxPlayers || 8;
-                if (players >= maxPlayers) return false;
-                const serverAge = server.timestamp ? (now - server.timestamp) : 0;
-                const isAlmostFull = players >= (maxPlayers - 1) && players < maxPlayers;
-                const isNearFull = players >= (maxPlayers - 2) && players < (maxPlayers - 1);
-                if (isAlmostFull && serverAge > 60000) return false;
-                if (isNearFull && serverAge > 90000) return false;
-                if (serverAge > 180000) return false;
-                return true;
-            })
-            .sort((a, b) => {
-                const aPlayers = a.players || 0;
-                const bPlayers = b.players || 0;
-                const aMaxPlayers = a.maxPlayers || 8;
-                const bMaxPlayers = b.maxPlayers || 8;
-                const aAlmostFull = a.isAlmostFull || (aPlayers >= (aMaxPlayers - 1) && aPlayers < aMaxPlayers);
-                const bAlmostFull = b.isAlmostFull || (bPlayers >= (bMaxPlayers - 1) && bPlayers < bMaxPlayers);
-                const aNearFull = a.isNearFull || (aPlayers >= (aMaxPlayers - 2) && aPlayers < (aMaxPlayers - 1));
-                const bNearFull = b.isNearFull || (bPlayers >= (bMaxPlayers - 2) && bPlayers < (bMaxPlayers - 1));
-                if (aAlmostFull && !bAlmostFull) return -1;
-                if (!aAlmostFull && bAlmostFull) return 1;
-                if (aNearFull && !bNearFull && !bAlmostFull) return -1;
-                if (!aNearFull && bNearFull && !aAlmostFull) return 1;
-                if (aPlayers !== bPlayers) return bPlayers - aPlayers;
-                const aAge = a.timestamp ? (now - a.timestamp) : 999999;
-                const bAge = b.timestamp ? (now - b.timestamp) : 999999;
-                return aAge - bAge;
-            })
-            .slice(0, limit);
+        // Servers are already filtered and sorted by getFreshestServers
+        const filtered = servers.slice(0, limit);
         
         const serverIds = filtered.map(s => s.id);
         console.log(`[API] /job-ids: Returning ${filtered.length} servers (excluded ${excludeList.length} job IDs)`);
@@ -594,20 +553,15 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
             servers: filtered,
             count: filtered.length,
             totalAvailable: servers.length,
-            cacheInfo: cacheInfo
+            cacheInfo: {
+                ...cacheInfo,
+                usedCount: cacheInfo.usedCount || 0
+            }
         });
         
-        const cacheAfterGet = jobIdFetcher.getCacheInfo();
-        if (cacheAfterGet.count < cacheInfo.count) {
+        // Save cache periodically if marked IDs changed
+        if (excludeList.length > 0) {
             jobIdFetcher.saveCache(false);
-            console.log(`[API] Cache saved: ${cacheAfterGet.count} valid servers (removed ${cacheInfo.count - cacheAfterGet.count} invalid/excluded)`);
-        } else if (excludeList.length > 0) {
-            const removedCount = jobIdFetcher.removeVisitedServers(excludeList);
-            if (removedCount > 0) {
-                jobIdFetcher.saveCache(false);
-                const cacheAfterFilter = jobIdFetcher.getCacheInfo();
-                console.log(`[API] Cache saved: ${cacheAfterFilter.count} servers (removed ${removedCount} excluded)`);
-            }
         }
         
         const cacheAge = cacheInfo.lastUpdated ? (Date.now() - new Date(cacheInfo.lastUpdated).getTime()) : Infinity;
@@ -649,16 +603,20 @@ app.post('/api/job-ids/used', authorize('BOT'), (req, res) => {
         
         const { jobIds } = req.body;
         if (!Array.isArray(jobIds) || jobIds.length === 0) {
-            return res.json({ success: false, error: 'Invalid jobIds array' });
+            return res.status(400).json({ success: false, error: 'Invalid or missing jobIds array in request body' });
         }
         
-        const removed = jobIdFetcher.removeVisitedServers(jobIds);
-        jobIdFetcher.saveCache();
+        const markedCount = jobIdFetcher.markAsUsed(jobIds);
+        jobIdFetcher.saveCache(false);
+        const cacheInfo = jobIdFetcher.getCacheInfo();
+        console.log(`[API] Marked ${markedCount} job IDs as used (total blacklisted: ${cacheInfo.usedCount}, available: ${cacheInfo.count})`);
         
         return res.json({ 
             success: true, 
-            removed: removed,
-            message: `Removed ${removed} job ID(s) from cache`
+            message: `Marked ${markedCount} job IDs as used.`,
+            blacklisted: markedCount,
+            totalBlacklisted: cacheInfo.usedCount,
+            available: cacheInfo.count
         });
     } catch (error) {
         console.error('[API] Error marking job IDs as used:', error.message);
