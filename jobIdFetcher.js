@@ -322,15 +322,16 @@ async function fetchBulkJobIds() {
         
         const currentCount = jobIdCache.jobIds.length;
         if (currentCount - lastSaveCount >= 100) {
-            console.log(`[Fetch] Incremental save: ${currentCount} servers cached`);
+            console.log(`[Cache] Saving cache: ${currentCount} servers (incremental save every 100)`);
             await new Promise((resolve) => {
                 setImmediate(() => {
                     try {
                         jobIdCache.lastUpdated = new Date().toISOString();
                         jobIdCache.totalFetched = currentCount;
                         fs.writeFileSync(CACHE_FILE, JSON.stringify(jobIdCache, null, 2));
+                        console.log(`[Cache] Saved ${currentCount} servers to cache`);
                     } catch (saveError) {
-                        console.error(`[Fetch] Failed to save cache incrementally: ${saveError.message}`);
+                        console.error(`[Cache] Failed to save cache incrementally: ${saveError.message}`);
                     }
                     resolve();
                 });
