@@ -404,8 +404,12 @@ function getFreshestServers(limit = 2000, excludeIds = []) {
     const allExcluded = new Set([...usedJobIds, ...excludeSet]);
     
     const validServers = [];
+    let excludedCount = 0;
     for (const [jobId, server] of serverMap.entries()) {
-        if (allExcluded.has(jobId)) continue;
+        if (allExcluded.has(jobId)) {
+            excludedCount++;
+            continue;
+        }
         
         const age = now - (server.timestamp || 0);
         if (age >= maxAge) continue;
@@ -442,9 +446,10 @@ function getFreshestServers(limit = 2000, excludeIds = []) {
         priority: server.priority
     }));
     
-    if (result.length > 0) {
-        const excludedCount = allExcluded.size;
-        console.log(`[Cache] getFreshestServers: Returning ${result.length} servers (excluded ${excludedCount} IDs) (first 5: ${result.slice(0, 5).map(s => s.id).join(', ')})`);
+    if (result.length > 0 || allExcluded.size > 0) {
+        const requestExcluded = excludeIds.length;
+        const blacklisted = usedJobIds.size;
+        console.log(`[Cache] getFreshestServers: Returning ${result.length} servers (excluded ${requestExcluded} from request, ${blacklisted} blacklisted) (first 5: ${result.slice(0, 5).map(s => s.id).join(', ')})`);
     }
     
     return result;
