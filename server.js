@@ -520,10 +520,17 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         const cacheInfo = jobIdFetcher.getCacheInfo();
         
         if (excludeList.length > 0) {
+            const cacheBefore = jobIdFetcher.getCacheInfo();
             const removedCount = jobIdFetcher.removeVisitedServers(excludeList);
             if (removedCount > 0) {
-                console.log(`[API] Removed ${removedCount} visited server(s) from cache`);
-                jobIdFetcher.saveCache(false);
+                console.log(`[API] Removed ${removedCount} visited server(s) from cache (was ${cacheBefore.count}, now ${cacheBefore.count - removedCount})`);
+                const saveResult = jobIdFetcher.saveCache(false);
+                if (saveResult) {
+                    const cacheAfter = jobIdFetcher.getCacheInfo();
+                    console.log(`[API] Cache saved: ${cacheAfter.count} servers remaining`);
+                }
+            } else {
+                console.log(`[API] Attempted to remove ${excludeList.length} job ID(s) but none were found in cache: ${excludeList.slice(0, 3).join(', ')}${excludeList.length > 3 ? '...' : ''}`);
             }
         }
         
