@@ -526,8 +526,15 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         
         const excludeSet = new Set(exclude.filter(id => id && id.length > 0));
         
-        const filtered = [];
+        if (exclude.length > 0) {
+            jobIdFetcher.removeVisitedServers(exclude);
+        }
+        
+        const almostFullServers = [];
+        const nearFullServers = [];
+        const otherServers = [];
         const now = Date.now();
+        
         for (const server of servers) {
             if (excludeSet.has(server.id)) continue;
             
@@ -539,27 +546,52 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
             if (serverAge > 180000) continue;
             
             if (players < maxPlayers) {
-                filtered.push(server);
-            }
-            
-            if (filtered.length >= limit && limit > 100) {
-                break;
+                const isAlmostFull = players >= (maxPlayers - 1) && players < maxPlayers;
+                const isNearFull = players >= (maxPlayers - 2) && players < (maxPlayers - 1);
+                
+                if (isAlmostFull) {
+                    almostFullServers.push(server);
+                } else if (isNearFull) {
+                    nearFullServers.push(server);
+                } else {
+                    otherServers.push(server);
+                }
             }
         }
+        
+        const filtered = [...almostFullServers, ...nearFullServers, ...otherServers];
         
         filtered.sort((a, b) => {
             const aPlayers = a.players || 0;
             const bPlayers = b.players || 0;
             const aMaxPlayers = a.maxPlayers || 8;
             const bMaxPlayers = b.maxPlayers || 8;
+            const aTimestamp = a.timestamp || 0;
+            const bTimestamp = b.timestamp || 0;
             
             const aAlmostFull = a.isAlmostFull || (aPlayers >= (aMaxPlayers - 1) && aPlayers < aMaxPlayers);
             const bAlmostFull = b.isAlmostFull || (bPlayers >= (bMaxPlayers - 1) && bPlayers < bMaxPlayers);
+            const aNearFull = a.isNearFull || (aPlayers >= (aMaxPlayers - 2) && aPlayers < (aMaxPlayers - 1));
+            const bNearFull = b.isNearFull || (bPlayers >= (bMaxPlayers - 2) && bPlayers < (bMaxPlayers - 1));
             
             if (aAlmostFull && !bAlmostFull) return -1;
             if (!aAlmostFull && bAlmostFull) return 1;
             
-            return bPlayers - aPlayers;
+            if (aAlmostFull && bAlmostFull) {
+                return bTimestamp - aTimestamp;
+            }
+            
+            if (aNearFull && !bNearFull && !bAlmostFull) return -1;
+            if (!aNearFull && bNearFull && !aAlmostFull) return 1;
+            
+            if (aNearFull && bNearFull) {
+                if (aPlayers !== bPlayers) return bPlayers - aPlayers;
+                return bTimestamp - aTimestamp;
+            }
+            
+            if (aPlayers !== bPlayers) return bPlayers - aPlayers;
+            
+            return bTimestamp - aTimestamp;
         });
         
         const limited = filtered.slice(0, limit);
