@@ -17,6 +17,8 @@ let jobIdCache = {
     totalFetched: 0
 };
 
+const attemptedRemovals = new Set();
+
 function loadCache() {
     try {
         if (fs.existsSync(CACHE_FILE)) {
@@ -673,8 +675,13 @@ module.exports = {
             const removed = beforeCount - jobIdCache.jobIds.length;
             if (removed > 0) {
                 console.log(`[Cache] Removed ${removed} visited server(s) from cache (${visitedSet.size} requested): ${removedIds.slice(0, 5).join(', ')}${removedIds.length > 5 ? '...' : ''}`);
+                removedIds.forEach(id => attemptedRemovals.delete(id));
             } else if (visitedSet.size > 0) {
-                console.log(`[Cache] Attempted to remove ${visitedSet.size} job ID(s) but none were found: ${Array.from(visitedSet).slice(0, 5).join(', ')}${visitedSet.size > 5 ? '...' : ''}`);
+                const newAttempts = Array.from(visitedSet).filter(id => !attemptedRemovals.has(id));
+                if (newAttempts.length > 0) {
+                    console.log(`[Cache] Attempted to remove ${newAttempts.length} job ID(s) but none were found (already removed or never cached): ${newAttempts.slice(0, 3).join(', ')}${newAttempts.length > 3 ? '...' : ''}`);
+                    newAttempts.forEach(id => attemptedRemovals.add(id));
+                }
             }
             return removed;
         } catch (error) {
