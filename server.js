@@ -520,7 +520,7 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         
         let servers = [];
         try {
-            const requestLimit = limit > 100 ? limit * 3 : limit * 2;
+            const requestLimit = Math.max(limit * 5, 500);
             servers = jobIdFetcher.getFreshestServers(requestLimit) || [];
         } catch (error) {
         }
@@ -586,10 +586,10 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         
         const cacheAge = cacheInfo.lastUpdated ? (Date.now() - new Date(cacheInfo.lastUpdated).getTime()) : Infinity;
         const shouldRefresh = !isFetching && (
-            cacheInfo.count < 200 || 
-            cacheAge > 120000 ||
-            (cacheInfo.count < 400 && cacheAge > 90000) ||
-            (cacheInfo.count < 600 && cacheAge > 120000)
+            cacheInfo.count < 300 || 
+            cacheAge > 30000 ||
+            (cacheInfo.count < 500 && cacheAge > 20000) ||
+            (cacheInfo.count < 800 && cacheAge > 30000)
         );
         
         if (shouldRefresh) {
@@ -700,7 +700,7 @@ function startServer() {
                     jobIdFetcher.saveCache();
                     
                     const cacheInfo = jobIdFetcher.getCacheInfo();
-                    if (cacheInfo.count < 1000 && !isFetching) {
+                    if (cacheInfo.count < 1500 && !isFetching) {
                         isFetching = true;
                         jobIdFetcher.fetchBulkJobIds()
                             .then(result => {
@@ -728,7 +728,7 @@ function startServer() {
                         const cacheInfo = jobIdFetcher.getCacheInfo();
                         const cacheAge = cacheInfo.lastUpdated ? (Date.now() - new Date(cacheInfo.lastUpdated).getTime()) : Infinity;
                         
-                        if (cacheInfo.count < 300 || cacheAge > 120000) {
+                        if (cacheInfo.count < 500 || cacheAge > 30000) {
                             isFetching = true;
                             jobIdFetcher.cleanCache();
                             jobIdFetcher.fetchBulkJobIds()
@@ -743,7 +743,7 @@ function startServer() {
                                     isFetching = false;
                                 });
                         }
-                    }, 45 * 1000);
+                    }, 20 * 1000);
                 });
             }
         });
