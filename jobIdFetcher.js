@@ -133,8 +133,27 @@ function saveCache(shouldClean = false) {
         }
         
         // Remove used job IDs from cache before saving
-        for (const usedId of usedJobIds) {
-            serverMap.delete(usedId);
+        // Check both exact match and normalized versions
+        const idsToRemove = [];
+        for (const [mapId, server] of serverMap.entries()) {
+            const mapIdStr = String(mapId).trim().toLowerCase();
+            const serverIdStr = server && server.id ? String(server.id).trim().toLowerCase() : mapIdStr;
+            
+            for (const usedId of usedJobIds) {
+                const usedIdStr = String(usedId).trim().toLowerCase();
+                if (mapIdStr === usedIdStr || serverIdStr === usedIdStr) {
+                    idsToRemove.push(mapId);
+                    break;
+                }
+            }
+        }
+        
+        for (const id of idsToRemove) {
+            serverMap.delete(id);
+        }
+        
+        if (idsToRemove.length > 0) {
+            console.log(`[Cache] Removed ${idsToRemove.length} blacklisted server(s) before saving`);
         }
         
         const serversArray = Array.from(serverMap.values());
@@ -398,16 +417,50 @@ async function fetchBulkJobIds() {
 function getFreshestServers(limit = 2000, excludeIds = []) {
     const now = Date.now();
     const maxAge = JOB_ID_MAX_AGE_MS;
-    const excludeSet = new Set(excludeIds.map(id => String(id).trim()));
     
-    // Combine excludeIds with usedJobIds
-    const allExcluded = new Set([...usedJobIds, ...excludeSet]);
+    // First, remove any blacklisted servers from serverMap
+    const idsToRemove = [];
+    for (const [mapId, server] of serverMap.entries()) {
+        const mapIdStr = String(mapId).trim().toLowerCase();
+        const serverIdStr = server && server.id ? String(server.id).trim().toLowerCase() : mapIdStr;
+        
+        // Check if this server is blacklisted
+        for (const usedId of usedJobIds) {
+            const usedIdStr = String(usedId).trim().toLowerCase();
+            if (mapIdStr === usedIdStr || serverIdStr === usedIdStr) {
+                idsToRemove.push(mapId);
+                break;
+            }
+        }
+    }
+    
+    // Remove blacklisted servers from map
+    for (const id of idsToRemove) {
+        serverMap.delete(id);
+    }
+    
+    const excludeSet = new Set(excludeIds.map(id => String(id).trim().toLowerCase()));
+    
+    // Normalize all blacklisted IDs to lowercase for comparison
+    const normalizedBlacklist = new Set(Array.from(usedJobIds).map(id => String(id).trim().toLowerCase()));
+    
+    // Combine excludeIds with usedJobIds (both normalized)
+    const allExcluded = new Set([...normalizedBlacklist, ...excludeSet]);
     
     const validServers = [];
-    let excludedCount = 0;
+    let excludedCount = idsToRemove.length;
+    let excludedIds = idsToRemove.map(id => String(id));
+    
     for (const [jobId, server] of serverMap.entries()) {
-        if (allExcluded.has(jobId)) {
+        const jobIdStr = String(jobId).trim().toLowerCase();
+        const serverIdStr = server && server.id ? String(server.id).trim().toLowerCase() : jobIdStr;
+        
+        // Check both the map key and the server.id property
+        if (allExcluded.has(jobIdStr) || allExcluded.has(serverIdStr)) {
             excludedCount++;
+            excludedIds.push(serverIdStr || jobIdStr);
+            // Also remove it from the map
+            serverMap.delete(jobId);
             continue;
         }
         
@@ -446,10 +499,13 @@ function getFreshestServers(limit = 2000, excludeIds = []) {
         priority: server.priority
     }));
     
-    if (result.length > 0 || allExcluded.size > 0) {
+    if (result.length > 0 || allExcluded.size > 0 || excludedCount > 0) {
         const requestExcluded = excludeIds.length;
         const blacklisted = usedJobIds.size;
-        console.log(`[Cache] getFreshestServers: Returning ${result.length} servers (excluded ${requestExcluded} from request, ${blacklisted} blacklisted) (first 5: ${result.slice(0, 5).map(s => s.id).join(', ')})`);
+        if (excludedCount > 0) {
+            console.log(`[Cache] getFreshestServers: Excluded ${excludedCount} blacklisted/requested IDs: ${excludedIds.slice(0, 3).join(', ')}${excludedIds.length > 3 ? '...' : ''}`);
+        }
+        console.log(`[Cache] getFreshestServers: Returning ${result.length} servers (excluded ${requestExcluded} from request, ${blacklisted} blacklisted, ${excludedCount} filtered out) (first 5: ${result.slice(0, 5).map(s => s.id).join(', ')})`);
     }
     
     return result;
