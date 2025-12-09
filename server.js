@@ -519,14 +519,8 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         
         const cacheInfo = jobIdFetcher.getCacheInfo();
         
-        // Mark excluded job IDs as used (permanently blacklist them)
-        if (excludeList.length > 0) {
-            const markedCount = jobIdFetcher.markAsUsed(excludeList);
-            if (markedCount > 0) {
-                console.log(`[API] Marked ${markedCount} excluded job ID(s) as used (total blacklisted: ${cacheInfo.usedCount})`);
-            }
-        }
-        
+        // Don't mark excluded IDs as used here - just exclude them from response
+        // They should only be blacklisted when explicitly marked via /api/job-ids/used
         let servers = [];
         try {
             const requestLimit = Math.max(limit * 5, 500);
@@ -536,10 +530,12 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         }
         
         // Servers are already filtered and sorted by getFreshestServers
+        // Filtered servers already exclude blacklisted and excluded IDs
         const filtered = servers.slice(0, limit);
         
         const serverIds = filtered.map(s => s.id);
-        console.log(`[API] /job-ids: Returning ${filtered.length} servers (excluded ${excludeList.length} job IDs)`);
+        const totalExcluded = excludeList.length + (cacheInfo.usedCount || 0);
+        console.log(`[API] /job-ids: Returning ${filtered.length} servers (excluded ${excludeList.length} job IDs from request, ${cacheInfo.usedCount || 0} total blacklisted)`);
         if (serverIds.length > 0) {
             console.log(`[API] Returning job IDs: ${serverIds.slice(0, 5).join(', ')}${serverIds.length > 5 ? '...' : ''}`);
         }
@@ -559,10 +555,7 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
             }
         });
         
-        // Save cache periodically if marked IDs changed
-        if (excludeList.length > 0) {
-            jobIdFetcher.saveCache(false);
-        }
+        // No need to save cache here - excluded IDs are just filtered, not blacklisted
         
         const cacheAge = cacheInfo.lastUpdated ? (Date.now() - new Date(cacheInfo.lastUpdated).getTime()) : Infinity;
         const shouldRefresh = !isFetching && (
