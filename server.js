@@ -545,9 +545,9 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
             const isAlmostFull = players >= (maxPlayers - 1) && players < maxPlayers;
             const isNearFull = players >= (maxPlayers - 2) && players < (maxPlayers - 1);
             
-            if (isAlmostFull && serverAge > 15000) continue;
-            if (isNearFull && serverAge > 30000) continue;
-            if (serverAge > 60000) continue;
+            if (isAlmostFull && serverAge > 60000) continue;
+            if (isNearFull && serverAge > 90000) continue;
+            if (serverAge > 180000) continue;
             
             if (players < maxPlayers) {
                 filtered.push(server);
@@ -587,9 +587,9 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         const cacheAge = cacheInfo.lastUpdated ? (Date.now() - new Date(cacheInfo.lastUpdated).getTime()) : Infinity;
         const shouldRefresh = !isFetching && (
             cacheInfo.count < 200 || 
-            cacheAge > 30000 ||
-            (cacheInfo.count < 400 && cacheAge > 20000) ||
-            (cacheInfo.count < 600 && cacheAge > 30000)
+            cacheAge > 120000 ||
+            (cacheInfo.count < 400 && cacheAge > 90000) ||
+            (cacheInfo.count < 600 && cacheAge > 120000)
         );
         
         if (shouldRefresh) {
@@ -719,7 +719,7 @@ function startServer() {
                             jobIdFetcher.cleanCache();
                             jobIdFetcher.saveCache();
                         }
-                    }, 15 * 1000);
+                    }, 30 * 1000);
                     
                     setInterval(() => {
                         if (isFetching) {
@@ -728,7 +728,7 @@ function startServer() {
                         const cacheInfo = jobIdFetcher.getCacheInfo();
                         const cacheAge = cacheInfo.lastUpdated ? (Date.now() - new Date(cacheInfo.lastUpdated).getTime()) : Infinity;
                         
-                        if (cacheInfo.count < 300 || cacheAge > 45000) {
+                        if (cacheInfo.count < 300 || cacheAge > 120000) {
                             isFetching = true;
                             jobIdFetcher.cleanCache();
                             jobIdFetcher.fetchBulkJobIds()
