@@ -514,10 +514,13 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         const limit = parseInt(req.query.limit) || 1000;
         const exclude = req.query.exclude ? req.query.exclude.split(',') : [];
         
-        if (exclude.length > 0) {
-            const removedCount = jobIdFetcher.removeVisitedServers(exclude);
+        const excludeList = exclude.filter(id => id && id.length > 0);
+        const excludeSet = new Set(excludeList);
+        
+        if (excludeList.length > 0) {
+            const removedCount = jobIdFetcher.removeVisitedServers(excludeList);
             if (removedCount > 0) {
-                console.log(`[API] Removed ${removedCount} visited server(s) from cache before fetching`);
+                console.log(`[API] Removed ${removedCount} visited server(s) from cache`);
             }
         }
         
@@ -526,11 +529,9 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         let servers = [];
         try {
             const requestLimit = Math.max(limit * 5, 500);
-            servers = jobIdFetcher.getFreshestServers(requestLimit) || [];
+            servers = jobIdFetcher.getFreshestServers(requestLimit, excludeList) || [];
         } catch (error) {
         }
-        
-        const excludeSet = new Set(exclude.filter(id => id && id.length > 0));
         
         const now = Date.now();
         const filtered = servers
@@ -569,7 +570,6 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
             })
             .slice(0, limit);
         
-        const excludeList = exclude.filter(id => id && id.length > 0);
         const serverIds = filtered.map(s => s.id);
         console.log(`[API] /job-ids: Returning ${filtered.length} servers (excluded ${excludeList.length} job IDs)`);
         if (serverIds.length > 0) {
