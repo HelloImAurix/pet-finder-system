@@ -57,23 +57,27 @@ function cleanCache() {
         
         jobIdCache.jobIds = jobIdCache.jobIds.filter(item => {
             if (typeof item === 'string' || typeof item === 'number') {
-                if (item === null || item === undefined || item === '') {
+                if (item === null || item === undefined || item === '' || String(item).trim() === '') {
                     invalidCount++;
                     return false;
                 }
                 return true;
             }
             if (typeof item === 'object' && item !== null) {
-                if (!item.id || item.id === null || item.id === undefined || item.id === '') {
+                if (!item.id || item.id === null || item.id === undefined || String(item.id).trim() === '') {
                     invalidCount++;
                     return false;
                 }
                 const timestamp = item.timestamp;
-                if (!timestamp || timestamp === 0) {
+                if (timestamp === undefined || timestamp === null) {
                     invalidCount++;
                     return false;
                 }
-                const age = now - timestamp;
+                if (typeof timestamp === 'number' && (isNaN(timestamp) || timestamp <= 0)) {
+                    invalidCount++;
+                    return false;
+                }
+                const age = now - (timestamp || 0);
                 if (age >= CACHE_CLEANUP_MAX_AGE_MS) {
                     expiredCount++;
                     return false;
@@ -305,20 +309,15 @@ async function fetchBulkJobIds() {
         const currentCount = jobIdCache.jobIds.length;
         if (currentCount - lastSaveCount >= 100) {
             console.log(`[Cache] Saving cache: ${currentCount} servers (incremental save every 100)`);
-            await new Promise((resolve) => {
-                setImmediate(() => {
-                    try {
-                        jobIdCache.lastUpdated = new Date().toISOString();
-                        jobIdCache.totalFetched = currentCount;
-                        fs.writeFileSync(CACHE_FILE, JSON.stringify(jobIdCache, null, 2));
-                        console.log(`[Cache] Saved ${currentCount} servers to cache`);
-                    } catch (saveError) {
-                        console.error(`[Cache] Failed to save cache incrementally: ${saveError.message}`);
-                    }
-                    resolve();
-                });
-            });
-            lastSaveCount = currentCount;
+            try {
+                jobIdCache.lastUpdated = new Date().toISOString();
+                jobIdCache.totalFetched = currentCount;
+                fs.writeFileSync(CACHE_FILE, JSON.stringify(jobIdCache, null, 2));
+                console.log(`[Cache] Saved ${currentCount} servers to cache`);
+                lastSaveCount = currentCount;
+            } catch (saveError) {
+                console.error(`[Cache] Failed to save cache incrementally: ${saveError.message}`);
+            }
         }
         
         cursor = data.nextPageCursor;
