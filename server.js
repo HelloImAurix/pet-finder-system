@@ -564,6 +564,16 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
             })
             .slice(0, limit);
         
+        const excludeList = exclude.filter(id => id && id.length > 0);
+        const serverIds = filtered.map(s => s.id);
+        console.log(`[API] /job-ids: Returning ${filtered.length} servers (excluded ${excludeList.length} job IDs)`);
+        if (serverIds.length > 0) {
+            console.log(`[API] Returning job IDs: ${serverIds.slice(0, 5).join(', ')}${serverIds.length > 5 ? '...' : ''}`);
+        }
+        if (excludeList.length > 0) {
+            console.log(`[API] Excluded job IDs: ${excludeList.slice(0, 5).join(', ')}${excludeList.length > 5 ? '...' : ''}`);
+        }
+        
         const cacheAge = cacheInfo.lastUpdated ? (Date.now() - new Date(cacheInfo.lastUpdated).getTime()) : Infinity;
         const shouldRefresh = !isFetching && (
             cacheInfo.count < 500 || 
@@ -592,7 +602,7 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         
         res.json({
             success: true,
-            jobIds: filtered.map(s => s.id),
+            jobIds: serverIds,
             servers: filtered,
             count: filtered.length,
             totalAvailable: servers.length,
