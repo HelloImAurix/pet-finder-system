@@ -10,6 +10,7 @@ const DELAY_BETWEEN_REQUESTS = parseInt(process.env.DELAY_BETWEEN_REQUESTS || '2
 const MIN_PLAYERS = parseInt(process.env.MIN_PLAYERS || '1', 10);
 const MAX_PLAYERS = parseInt(process.env.MAX_PLAYERS || '6', 10);
 const JOB_ID_MAX_AGE_MS = parseInt(process.env.JOB_ID_MAX_AGE_MS || '180000', 10);
+const CACHE_CLEANUP_MAX_AGE_MS = parseInt(process.env.CACHE_CLEANUP_MAX_AGE_MS || '600000', 10);
 let jobIdCache = {
     jobIds: [],
     lastUpdated: null,
@@ -58,7 +59,6 @@ function cleanCache() {
     if (Array.isArray(jobIdCache.jobIds)) {
         const originalLength = jobIdCache.jobIds.length;
         const now = Date.now();
-        const maxAge = JOB_ID_MAX_AGE_MS;
         let expiredCount = 0;
         let fullCount = 0;
         let invalidCount = 0;
@@ -77,7 +77,7 @@ function cleanCache() {
                     return false;
                 }
                 const age = now - (item.timestamp || 0);
-                if (age >= maxAge) {
+                if (age >= CACHE_CLEANUP_MAX_AGE_MS) {
                     expiredCount++;
                     return false;
                 }
@@ -92,24 +92,15 @@ function cleanCache() {
                     return false;
                 }
                 
-                const isAlmostFull = players >= (maxPlayers - 1) && players < maxPlayers;
-                const isNearFull = players >= (maxPlayers - 2) && players < (maxPlayers - 1);
-                
-                if (isAlmostFull && age > 60000) {
-                    fullCount++;
-                    return false;
-                }
-                
-                if (isNearFull && age > 90000) {
-                    return false;
-                }
-                
                 return true;
             }
             invalidCount++;
             return false;
         });
         
+        if (expiredCount > 0 || fullCount > 0 || invalidCount > 0) {
+            console.log(`[Cache] Cleaned: ${expiredCount} expired, ${fullCount} full, ${invalidCount} invalid servers removed`);
+        }
     }
 }
 
@@ -161,8 +152,8 @@ function makeRequest(url) {
     });
 }
 
-async function fetchPage(cursor = null, retryCount = 0) {
-    let url = `https://games.roblox.com/v1/games/${PLACE_ID}/servers/Public?sortOrder=Desc&limit=100&excludeFullGames=true`;
+async function fetchPage(cursor = null, retryCount = 0, sortOrder = 'Desc') {
+    let url = `https://games.roblox.com/v1/games/${PLACE_ID}/servers/Public?sortOrder=${sortOrder}&limit=100&excludeFullGames=true`;
     if (cursor) {
         url += `&cursor=${cursor}`;
     }
@@ -242,7 +233,8 @@ async function fetchBulkJobIds() {
         
         let data;
         try {
-            data = await fetchPage(cursor, 0);
+            const sortOrder = pagesFetched % 10 < 7 ? 'Desc' : 'Asc';
+            data = await fetchPage(cursor, 0, sortOrder);
         } catch (error) {
             if (error.message.includes('429') || error.message.includes('Too many requests')) {
                 await new Promise(resolve => setTimeout(resolve, 30000));
@@ -308,11 +300,16 @@ async function fetchBulkJobIds() {
                 !isPrivateServer && 
                 !existingJobIds.has(jobId) && 
                 jobIdCache.jobIds.length < MAX_JOB_IDS) {
+                const isAlmostFull = players >= (maxPlayers - 1) && players < maxPlayers;
+                const isNearFull = players >= (maxPlayers - 2) && players < (maxPlayers - 1);
+                const priority = isAlmostFull ? 3 : (isNearFull ? 2 : (players > 0 ? 1 : 0));
+                
                 jobIdCache.jobIds.push({
                     id: jobId,
                     timestamp: Date.now(),
                     players: players,
-                    maxPlayers: maxPlayers
+                    maxPlayers: maxPlayers,
+                    priority: priority
                 });
                 existingJobIds.add(jobId);
                 pageAdded++;
@@ -369,6 +366,14 @@ async function fetchBulkJobIds() {
     
     const beforeSort = jobIdCache.jobIds.length;
     jobIdCache.jobIds.sort((a, b) => {
+        const aPriority = typeof a === 'object' && a !== null ? (a.priority || 0) : 0;
+        const bPriority = typeof b === 'object' && b !== null ? (b.priority || 0) : 0;
+        if (aPriority !== bPriority) return bPriority - aPriority;
+        
+        const aPlayers = typeof a === 'object' && a !== null ? (a.players || 0) : 0;
+        const bPlayers = typeof b === 'object' && b !== null ? (b.players || 0) : 0;
+        if (aPlayers !== bPlayers) return bPlayers - aPlayers;
+        
         const tsA = typeof a === 'object' && a !== null ? (a.timestamp || 0) : Date.now();
         const tsB = typeof b === 'object' && b !== null ? (b.timestamp || 0) : Date.now();
         return tsB - tsA;
@@ -519,6 +524,10 @@ module.exports = {
                     return false;
                 })
                 .sort((a, b) => {
+                    const aPriority = typeof a === 'object' && a !== null ? (a.priority || 0) : 0;
+                    const bPriority = typeof b === 'object' && b !== null ? (b.priority || 0) : 0;
+                    if (aPriority !== bPriority) return bPriority - aPriority;
+                    
                     const tsA = typeof a === 'object' ? (a.timestamp || 0) : Date.now();
                     const tsB = typeof b === 'object' ? (b.timestamp || 0) : Date.now();
                     
@@ -548,13 +557,16 @@ module.exports = {
                     if (typeof item === 'object' && item !== null) {
                         const players = item.players || 0;
                         const maxPlayers = item.maxPlayers || 8;
+                        const isAlmostFull = players >= (maxPlayers - 1) && players < maxPlayers;
+                        const isNearFull = players >= (maxPlayers - 2) && players < (maxPlayers - 1);
                         return {
                             id: item.id.toString(),
                             players: players,
                             maxPlayers: maxPlayers,
                             timestamp: item.timestamp || Date.now(),
-                            isAlmostFull: players >= (maxPlayers - 1) && players < maxPlayers,
-                            isNearFull: players >= (maxPlayers - 2) && players < (maxPlayers - 1)
+                            isAlmostFull: isAlmostFull,
+                            isNearFull: isNearFull,
+                            priority: item.priority || (isAlmostFull ? 3 : (isNearFull ? 2 : (players > 0 ? 1 : 0)))
                         };
                     } else {
                         return {
