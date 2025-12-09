@@ -526,6 +526,28 @@ module.exports = {
     },
     getFreshestServers: (limit = 2000, excludeIds = []) => {
         try {
+            if (excludeIds.length > 0) {
+                const excludeSet = new Set(excludeIds.map(id => String(id).trim()).filter(id => id.length > 0));
+                if (excludeSet.size > 0) {
+                    const beforeCount = jobIdCache.jobIds.length;
+                    jobIdCache.jobIds = jobIdCache.jobIds.filter(item => {
+                        let itemId;
+                        if (typeof item === 'string' || typeof item === 'number') {
+                            itemId = String(item).trim();
+                        } else if (typeof item === 'object' && item !== null && item.id) {
+                            itemId = String(item.id).trim();
+                        } else {
+                            return true;
+                        }
+                        return !excludeSet.has(itemId);
+                    });
+                    const removedCount = beforeCount - jobIdCache.jobIds.length;
+                    if (removedCount > 0) {
+                        console.log(`[Cache] getFreshestServers: Removed ${removedCount} excluded server(s) from cache`);
+                    }
+                }
+            }
+            
             const ids = jobIdCache.jobIds || [];
             const now = Date.now();
             const maxAge = JOB_ID_MAX_AGE_MS;
