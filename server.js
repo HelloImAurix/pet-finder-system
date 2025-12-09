@@ -537,7 +537,7 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         let servers = [];
         try {
             const requestLimit = Math.max(limit * 5, 500);
-            servers = jobIdFetcher.getFreshestServers(requestLimit, excludeList) || [];
+            servers = jobIdFetcher.getFreshestServers(requestLimit, excludeList, true) || [];
         } catch (error) {
             console.error('[API] Error getting freshest servers:', error.message);
         }
@@ -596,6 +596,19 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
             totalAvailable: servers.length,
             cacheInfo: cacheInfo
         });
+        
+        const cacheAfterGet = jobIdFetcher.getCacheInfo();
+        if (cacheAfterGet.count < cacheInfo.count) {
+            jobIdFetcher.saveCache(false);
+            console.log(`[API] Cache saved: ${cacheAfterGet.count} valid servers (removed ${cacheInfo.count - cacheAfterGet.count} invalid/excluded)`);
+        } else if (excludeList.length > 0) {
+            const removedCount = jobIdFetcher.removeVisitedServers(excludeList);
+            if (removedCount > 0) {
+                jobIdFetcher.saveCache(false);
+                const cacheAfterFilter = jobIdFetcher.getCacheInfo();
+                console.log(`[API] Cache saved: ${cacheAfterFilter.count} servers (removed ${removedCount} excluded)`);
+            }
+        }
         
         const cacheAge = cacheInfo.lastUpdated ? (Date.now() - new Date(cacheInfo.lastUpdated).getTime()) : Infinity;
         const shouldRefresh = !isFetching && (
