@@ -398,8 +398,9 @@ app.post('/api/pet-found', authorize('BOT'), rateLimit, (req, res) => {
             }
         }
         
+        console.log(`[API] Received ${finds.length} pet(s) from ${accountName} - Added: ${addedCount}, Skipped: ${skippedCount}, Invalid: ${invalidCount}, Duplicates: ${duplicateCount}`);
         if (addedCount > 0) {
-            console.log(`[API] Received ${addedCount} pet(s) from ${accountName}`);
+            console.log(`[API] Total finds in memory: ${petFinds.length}, Index size: ${findIndexes.byTimestamp.length}`);
         }
         
         res.status(200).json({ 
@@ -433,9 +434,12 @@ app.get('/api/finds/recent', authorize('GUI'), rateLimit, (req, res) => {
         const limit = Math.min(parseInt(req.query.limit) || 500, 1000);
         const since = req.query.since ? parseInt(req.query.since) : null;
         
+        console.log(`[API] /finds/recent: petFinds.length=${petFinds.length}, byTimestamp.length=${findIndexes.byTimestamp.length}`);
+        
         let hourFinds = findIndexes.byTimestamp.filter(find => {
             const findTime = getFindTimestamp(find);
-            return findTime > oneHourAgo && (!since || findTime > since);
+            const isValid = findTime > oneHourAgo && (!since || findTime > since);
+            return isValid;
         });
         
         const last10Minutes = [];
@@ -452,6 +456,8 @@ app.get('/api/finds/recent', authorize('GUI'), rateLimit, (req, res) => {
         
         const combined = [...last10Minutes, ...olderButWithinHour].slice(0, limit);
         
+        console.log(`[API] /finds/recent: returning ${combined.length} finds (${last10Minutes.length} recent, ${olderButWithinHour.length} older)`);
+        
         res.json({ 
             success: true, 
             finds: combined, 
@@ -461,6 +467,7 @@ app.get('/api/finds/recent', authorize('GUI'), rateLimit, (req, res) => {
             timestamp: now
         });
     } catch (error) {
+        console.error('[API] /finds/recent error:', error);
         res.status(500).json({ success: false, error: error.message });
     }
 });
