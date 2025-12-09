@@ -9,7 +9,7 @@ const PAGES_TO_FETCH = parseInt(process.env.PAGES_TO_FETCH || '100', 10);
 const DELAY_BETWEEN_REQUESTS = parseInt(process.env.DELAY_BETWEEN_REQUESTS || '6000', 10);
 const MIN_PLAYERS = parseInt(process.env.MIN_PLAYERS || '1', 10);
 const MAX_PLAYERS = parseInt(process.env.MAX_PLAYERS || '6', 10);
-const JOB_ID_MAX_AGE_MS = parseInt(process.env.JOB_ID_MAX_AGE_MS || '600000', 10);
+const JOB_ID_MAX_AGE_MS = parseInt(process.env.JOB_ID_MAX_AGE_MS || '180000', 10);
 let jobIdCache = {
     jobIds: [],
     lastUpdated: null,
@@ -486,7 +486,11 @@ module.exports = {
                         if (players < 0 || players > maxPlayers) return false;
                         
                         const isAlmostFull = players >= (maxPlayers - 1) && players < maxPlayers;
-                        if (isAlmostFull && age > 300000) {
+                        if (isAlmostFull && age > 120000) {
+                            return false;
+                        }
+                        
+                        if (age > 180000) {
                             return false;
                         }
                         
@@ -541,7 +545,13 @@ module.exports = {
                 if (typeof item === 'string' || typeof item === 'number') return true;
                 if (typeof item === 'object' && item !== null) {
                     const age = now - (item.timestamp || 0);
-                    return age < maxAge;
+                    if (age >= maxAge) return false;
+                    
+                    const players = item.players || 0;
+                    const maxPlayers = item.maxPlayers || 8;
+                    if (players >= maxPlayers) return false;
+                    
+                    return true;
                 }
                 return false;
             });
