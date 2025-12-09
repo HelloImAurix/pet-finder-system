@@ -96,10 +96,6 @@ const findIndexes = {
     byPlaceId: new Map()
 };
 
-const serverQualityScores = new Map();
-const SERVER_QUALITY_DECAY_HOURS = 24;
-const MIN_FINDS_FOR_SCORE = 1;
-
 function addToIndexes(find) {
     const mps = find.mps || 0;
     let inserted = false;
@@ -173,90 +169,6 @@ function getFindTimestamp(find) {
         return ts < 10000000000 ? ts * 1000 : ts;
     }
     return Date.now();
-}
-
-function updateServerQuality(find) {
-    if (!find.jobId || find.jobId === '') return;
-    
-    const jobId = String(find.jobId);
-    const mps = find.mps || 0;
-    const now = Date.now();
-    const isNewServer = !serverQualityScores.has(jobId);
-    
-    if (isNewServer) {
-        serverQualityScores.set(jobId, {
-            jobId: jobId,
-            totalFinds: 0,
-            totalMPS: 0,
-            maxMPS: 0,
-            avgMPS: 0,
-            qualityScore: 0,
-            lastFindTime: now,
-            firstFindTime: now
-        });
-    }
-    
-    const score = serverQualityScores.get(jobId);
-    score.totalFinds += 1;
-    score.totalMPS += mps;
-    score.avgMPS = score.totalMPS / score.totalFinds;
-    score.maxMPS = Math.max(score.maxMPS, mps);
-    score.lastFindTime = now;
-    
-    const baseScore = score.avgMPS / 1000000;
-    const bonusScore = (score.maxMPS / 1000000) * 0.3;
-    const findCountBonus = Math.min(score.totalFinds * 0.1, 5);
-    score.qualityScore = baseScore + bonusScore + findCountBonus;
-    
-    if (isNewServer || score.totalFinds === 1) {
-        console.log(`[Quality] New server tracked: ${jobId} (MPS: ${(mps/1000000).toFixed(1)}M, Score: ${score.qualityScore.toFixed(2)})`);
-    } else if (score.totalFinds % 5 === 0) {
-        console.log(`[Quality] Server ${jobId}: ${score.totalFinds} finds, avg ${(score.avgMPS/1000000).toFixed(1)}M MPS, score ${score.qualityScore.toFixed(2)}`);
-    }
-}
-
-function getServerQualityScores(jobIds) {
-    const now = Date.now();
-    const decayTime = SERVER_QUALITY_DECAY_HOURS * 60 * 60 * 1000;
-    const scores = {};
-    
-    for (const jobId of jobIds) {
-        const jobIdStr = String(jobId);
-        if (serverQualityScores.has(jobIdStr)) {
-            const score = serverQualityScores.get(jobIdStr);
-            const age = now - score.lastFindTime;
-            
-            if (age < decayTime && score.totalFinds >= MIN_FINDS_FOR_SCORE) {
-                const decayFactor = 1 - (age / decayTime) * 0.5;
-                scores[jobIdStr] = {
-                    qualityScore: score.qualityScore * decayFactor,
-                    avgMPS: score.avgMPS,
-                    maxMPS: score.maxMPS,
-                    totalFinds: score.totalFinds,
-                    lastFindTime: score.lastFindTime
-                };
-            }
-        }
-    }
-    
-    return scores;
-}
-
-function cleanupOldServerScores() {
-    const now = Date.now();
-    const decayTime = SERVER_QUALITY_DECAY_HOURS * 60 * 60 * 1000;
-    const toRemove = [];
-    
-    for (const [jobId, score] of serverQualityScores.entries()) {
-        const age = now - score.lastFindTime;
-        if (age > decayTime * 2) {
-            toRemove.push(jobId);
-        }
-    }
-    
-    for (const jobId of toRemove) {
-        serverQualityScores.delete(jobId);
-    }
 }
 function cleanupOldFinds() {
     const now = Date.now();
@@ -473,7 +385,6 @@ app.post('/api/pet-found', authorize('BOT'), rateLimit, (req, res) => {
             
             petFinds.unshift(find);
             addToIndexes(find);
-            updateServerQuality(find);
             addedCount++;
         }
         
@@ -616,7 +527,6 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         const excludeSet = new Set(exclude.filter(id => id && id.length > 0));
         
         const filtered = [];
-        const jobIdsForQuality = [];
         for (const server of servers) {
             if (excludeSet.has(server.id)) continue;
             
@@ -626,19 +536,11 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
             
             if (players < maxPlayers) {
                 filtered.push(server);
-                if (server.id) jobIdsForQuality.push(server.id);
             }
             
             if (filtered.length >= limit && limit > 100) {
                 break;
             }
-        }
-        
-        const qualityScores = getServerQualityScores(jobIdsForQuality);
-        const serversWithScores = Object.keys(qualityScores).length;
-        
-        if (serversWithScores > 0) {
-            console.log(`[API] Using quality scores for ${serversWithScores} servers (${filtered.length} total available)`);
         }
         
         filtered.sort((a, b) => {
@@ -650,29 +552,11 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
             const aAlmostFull = a.isAlmostFull || (aPlayers >= (aMaxPlayers - 1) && aPlayers < aMaxPlayers);
             const bAlmostFull = b.isAlmostFull || (bPlayers >= (bMaxPlayers - 1) && bPlayers < bMaxPlayers);
             
-            const aQuality = qualityScores[a.id] ? qualityScores[a.id].qualityScore : 0;
-            const bQuality = qualityScores[b.id] ? qualityScores[b.id].qualityScore : 0;
-            
-            if (aQuality > 0 && bQuality === 0) return -1;
-            if (aQuality === 0 && bQuality > 0) return 1;
-            if (aQuality > 0 && bQuality > 0) {
-                if (Math.abs(aQuality - bQuality) > 5) {
-                    return bQuality - aQuality;
-                }
-            }
-            
             if (aAlmostFull && !bAlmostFull) return -1;
             if (!aAlmostFull && bAlmostFull) return 1;
             
             return bPlayers - aPlayers;
         });
-        
-        for (const server of filtered) {
-            if (qualityScores[server.id]) {
-                server.qualityScore = qualityScores[server.id].qualityScore;
-                server.avgMPS = qualityScores[server.id].avgMPS;
-            }
-        }
         
         const limited = filtered.slice(0, limit);
         
