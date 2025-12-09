@@ -517,6 +517,8 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
         const excludeList = exclude.filter(id => id && id.length > 0);
         const excludeSet = new Set(excludeList);
         
+        const cacheInfo = jobIdFetcher.getCacheInfo();
+        
         if (excludeList.length > 0) {
             const removedCount = jobIdFetcher.removeVisitedServers(excludeList);
             if (removedCount > 0) {
@@ -525,13 +527,12 @@ app.get('/api/job-ids', authorize('BOT'), (req, res) => {
             }
         }
         
-        const cacheInfo = jobIdFetcher.getCacheInfo();
-        
         let servers = [];
         try {
             const requestLimit = Math.max(limit * 5, 500);
             servers = jobIdFetcher.getFreshestServers(requestLimit, excludeList) || [];
         } catch (error) {
+            console.error('[API] Error getting freshest servers:', error.message);
         }
         
         const now = Date.now();
