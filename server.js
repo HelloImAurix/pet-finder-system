@@ -25,7 +25,9 @@ const cors = require('cors');
 const https = require('https');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+
+// Railway sets PORT automatically - use it or default to 3000
+const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
 /**
  * Server Configuration
@@ -1099,18 +1101,29 @@ setInterval(() => {
 
 /**
  * GET /health
- * Health check endpoint (no authentication required)
+ * Health check endpoint for Railway monitoring (no authentication required)
  * 
+ * Railway uses this endpoint to verify the service is running.
  * Returns server status, cache info, and storage stats.
- * Useful for monitoring and debugging.
  */
 app.get('/health', (req, res) => {
     try {
-        res.json({ 
-            status: 'healthy', 
+        const cacheInfo = jobManager.getCacheInfo();
+        const storageStats = petFindStorage.getStats();
+        
+        // Determine health status
+        const isHealthy = cacheInfo.available > 0 || cacheInfo.isFetching;
+        
+        res.status(isHealthy ? 200 : 503).json({ 
+            status: isHealthy ? 'healthy' : 'degraded',
             timestamp: new Date().toISOString(),
-            cache: jobManager.getCacheInfo(),
-            storage: petFindStorage.getStats()
+            uptime: process.uptime(),
+            memory: {
+                used: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
+                total: Math.round(process.memoryUsage().heapTotal / 1024 / 1024)
+            },
+            cache: cacheInfo,
+            storage: storageStats
         });
     } catch (error) {
         console.error('[Health] Error:', error);
@@ -1365,39 +1378,73 @@ app.get('/api/pets', rateLimit, authenticate, (req, res) => {
     }
 });
 
+// Start server - Railway requires binding to 0.0.0.0
 const server = app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[Server] Started on port ${PORT} (0.0.0.0:${PORT})`);
+    console.log(`[Server] ✓ Started successfully on port ${PORT}`);
+    console.log(`[Server] Environment: ${process.env.NODE_ENV || 'development'}`);
     console.log(`[Server] Place ID: ${CONFIG.PLACE_ID}`);
     console.log(`[Server] API Key: ${API_KEY.substring(0, 10)}...`);
     console.log(`[Server] Max Job IDs: ${CONFIG.MAX_JOB_IDS}`);
     console.log(`[Server] Visited expiry: ${CONFIG.VISITED_EXPIRY_MS / 60000} minutes`);
+    console.log(`[Server] Ready to accept connections`);
+});
+
+// Handle server errors gracefully
+server.on('error', (error) => {
+    if (error.code === 'EADDRINUSE') {
+        console.error(`[Server] Port ${PORT} is already in use`);
+        process.exit(1);
+    } else {
+        console.error('[Server] Error:', error);
+    }
 });
 
 /**
  * Graceful shutdown handler
- * Closes server and exits process cleanly on termination signals
+ * Railway sends SIGTERM when stopping containers - handle it gracefully
  * 
  * @param {string} signal - Termination signal (SIGTERM, SIGINT)
  */
 function shutdown(signal) {
     console.log(`[Server] ${signal} received, shutting down gracefully...`);
+    
+    // Stop accepting new connections
     server.close(() => {
-        console.log('[Server] Closed');
+        console.log('[Server] HTTP server closed');
+        
+        // Clear all intervals to prevent hanging
+        const highestIntervalId = setInterval(() => {}, 9999);
+        for (let i = 0; i < highestIntervalId; i++) {
+            clearInterval(i);
+        }
+        
+        console.log('[Server] Cleanup complete, exiting...');
         process.exit(0);
     });
+    
+    // Force shutdown after 10 seconds if graceful shutdown fails
+    setTimeout(() => {
+        console.error('[Server] Forced shutdown after timeout');
+        process.exit(1);
+    }, 10000);
 }
 
+// Railway sends SIGTERM for graceful shutdowns
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
-// Global error handlers to prevent crashes
+// Global error handlers - Railway will restart the container if needed
 process.on('uncaughtException', (error) => {
     console.error('[UncaughtException]', error);
-    // Don't exit - let the server continue running
+    console.error('[UncaughtException] Stack:', error.stack);
+    // Don't exit - let Railway handle restarts if needed
 });
 
 process.on('unhandledRejection', (reason, promise) => {
     console.error('[UnhandledRejection]', reason);
-    // Don't exit - let the server continue running
+    if (reason instanceof Error) {
+        console.error('[UnhandledRejection] Stack:', reason.stack);
+    }
+    // Don't exit - let Railway handle restarts if needed
 });
 
