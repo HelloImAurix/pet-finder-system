@@ -1105,12 +1105,21 @@ setInterval(() => {
  * Useful for monitoring and debugging.
  */
 app.get('/health', (req, res) => {
-    res.json({ 
-        status: 'healthy', 
-        timestamp: new Date().toISOString(),
-        cache: jobManager.getCacheInfo(),
-        storage: petFindStorage.getStats()
-    });
+    try {
+        res.json({ 
+            status: 'healthy', 
+            timestamp: new Date().toISOString(),
+            cache: jobManager.getCacheInfo(),
+            storage: petFindStorage.getStats()
+        });
+    } catch (error) {
+        console.error('[Health] Error:', error);
+        res.status(500).json({ 
+            status: 'error', 
+            error: error.message,
+            timestamp: new Date().toISOString()
+        });
+    }
 });
 
 /**
@@ -1356,12 +1365,8 @@ app.get('/api/pets', rateLimit, authenticate, (req, res) => {
     }
 });
 
-// ============================================================================
-// SERVER STARTUP
-// ============================================================================
-
-const server = app.listen(PORT, () => {
-    console.log(`[Server] Started on port ${PORT}`);
+const server = app.listen(PORT, '0.0.0.0', () => {
+    console.log(`[Server] Started on port ${PORT} (0.0.0.0:${PORT})`);
     console.log(`[Server] Place ID: ${CONFIG.PLACE_ID}`);
     console.log(`[Server] API Key: ${API_KEY.substring(0, 10)}...`);
     console.log(`[Server] Max Job IDs: ${CONFIG.MAX_JOB_IDS}`);
@@ -1384,4 +1389,15 @@ function shutdown(signal) {
 
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
+
+// Global error handlers to prevent crashes
+process.on('uncaughtException', (error) => {
+    console.error('[UncaughtException]', error);
+    // Don't exit - let the server continue running
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('[UnhandledRejection]', reason);
+    // Don't exit - let the server continue running
+});
 
