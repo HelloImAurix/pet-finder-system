@@ -1,12 +1,11 @@
 {
   "name": "pet-finder-api",
   "version": "1.0.0",
-  "description": "API server for Pet Finder Bot system",
+  "description": "API server for Pet Finder Bot system - Railway deployment ready",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node server.js",
-    "postinstall": "echo 'Dependencies installed successfully'"
+    "dev": "node server.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
@@ -14,13 +13,14 @@
   },
   "engines": {
     "node": ">=14.0.0",
-    "npm": ">=7.0.0"
+    "npm": ">=6.0.0"
   },
   "keywords": [
     "pet-finder",
     "api",
     "roblox",
-    "server"
+    "server",
+    "railway"
   ],
   "author": "",
   "license": "ISC"
