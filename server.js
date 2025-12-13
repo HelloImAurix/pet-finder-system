@@ -1,5 +1,5 @@
 /**
- * Pet Finder API Server
+ * API Server
  * 
  * Backend API server for managing Roblox server distribution and pet find storage.
  * Provides endpoints for Lua scripts to request servers and submit pet finds.
