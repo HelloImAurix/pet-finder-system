@@ -4,18 +4,22 @@
   "description": "API server for Pet Finder Bot system",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "dev": "node server.js"
   },
   "dependencies": {
-    "express": "^4.18.2",
     "cors": "^2.8.5",
-    "ws": "^8.14.2",
-    "compression": "^1.7.4",
-    "helmet": "^7.1.0"
+    "express": "^4.22.1"
+  },
+  "engines": {
+    "node": ">=14.0.0",
+    "npm": ">=6.0.0"
   },
   "keywords": [
     "pet-finder",
-    "api"
+    "api",
+    "roblox",
+    "server"
   ],
   "author": "",
   "license": "ISC"
