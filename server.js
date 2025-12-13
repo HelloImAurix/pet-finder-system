@@ -1100,6 +1100,19 @@ setInterval(() => {
 }, CONFIG.CLEANUP_INTERVAL_MS);
 
 /**
+ * GET /api/job-ids
+ * Legacy endpoint - redirects to /api/server/next for backwards compatibility
+ */
+app.get('/api/job-ids', (req, res) => {
+    res.status(404).json({
+        success: false,
+        error: 'Endpoint deprecated',
+        message: 'Use /api/server/next instead',
+        redirect: '/api/server/next'
+    });
+});
+
+/**
  * GET /health
  * Health check endpoint for Railway monitoring (no authentication required)
  * 
