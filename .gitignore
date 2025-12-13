@@ -1,6 +1,6 @@
 # Dependencies
 node_modules/
-# package-lock.json - Usually committed, but exclude if you prefer
+package-lock.json
 
 # Environment and secrets
 .env
