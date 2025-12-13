@@ -1,5 +1,5 @@
 /**
- * API Server
+ * Pet Finder API Server
  * 
  * Backend API server for managing Roblox server distribution and pet find storage.
  * Provides endpoints for Lua scripts to request servers and submit pet finds.
@@ -280,7 +280,7 @@ class PetFindStorage {
         }
 
         return {
-            id: `${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+            id: `${Date.now()}_${Math.random().toString(36).substring(2, 11)}`,
             petName: String(findData.petName).trim(),
             generation: String(findData.generation || 'N/A'),
             mps: parseFloat(findData.mps) || 0,
@@ -393,8 +393,9 @@ class JobManager {
         // Servers expire after 30 minutes and become available again
         this.visitedJobIds = new Map();
         
-        // Temporarily reserved servers during distribution (normalizedId -> timestamp)
+        // Temporarily reserved servers during distribution (normalizedId -> { timestamp, serverData })
         // Prevents duplicate distribution during concurrent requests
+        // Stores server data so it can be restored if reservation expires
         this.reservedJobIds = new Map();
         
         // Fetching state flags
@@ -444,7 +445,23 @@ class JobManager {
      * @returns {boolean} - True if server is reserved
      */
     isServerReserved(normalizedId) {
-        return this.reservedJobIds.has(normalizedId);
+        if (!this.reservedJobIds.has(normalizedId)) {
+            return false;
+        }
+        // Check if reservation has expired
+        const reserved = this.reservedJobIds.get(normalizedId);
+        const now = Date.now();
+        const age = now - (reserved.timestamp || reserved); // Support both old format (timestamp) and new format (object)
+        
+        if (age > CONFIG.PENDING_TIMEOUT_MS) {
+            // Reservation expired - restore server to available pool if not visited
+            this.reservedJobIds.delete(normalizedId);
+            if (!this.isServerVisited(normalizedId) && reserved.serverData && !this.availableServers.has(normalizedId)) {
+                this.availableServers.set(normalizedId, reserved.serverData);
+            }
+            return false;
+        }
+        return true;
     }
 
     /**
@@ -643,8 +660,8 @@ class JobManager {
                         continue;
                     }
 
-                    // Skip if already in pool
-                    if (this.availableServers.has(normalizedId)) {
+                    // Skip if already in pool or reserved
+                    if (this.availableServers.has(normalizedId) || this.isServerReserved(normalizedId)) {
                         continue;
                     }
 
@@ -767,11 +784,20 @@ class JobManager {
 
             // Atomically remove from pool and mark as reserved
             // This prevents the same server from being given to multiple users
+            // Store server data so it can be restored if reservation expires
             for (const result of results) {
                 const normalizedId = result.normalizedId || this.normalizeJobId(result.id || result.jobId);
                 
-                this.availableServers.delete(normalizedId);
-                this.reservedJobIds.set(normalizedId, now);
+                // Get server data before removing from pool
+                const serverData = this.availableServers.get(normalizedId);
+                if (serverData) {
+                    this.availableServers.delete(normalizedId);
+                    // Store both timestamp and server data for restoration
+                    this.reservedJobIds.set(normalizedId, {
+                        timestamp: now,
+                        serverData: serverData
+                    });
+                }
             }
 
             console.log(`[JobManager] Distributed ${results.length} server(s) to frontend (${this.availableServers.size} remaining)`);
@@ -862,22 +888,34 @@ class JobManager {
      * Releases servers that were reserved but never marked as visited.
      * This happens if a frontend request fails or times out.
      * Servers are released after PENDING_TIMEOUT_MS (10 seconds).
+     * Restores server data to available pool if not visited.
      * 
      * @returns {number} - Number of servers released
      */
     cleanupReservedServers() {
         const now = Date.now();
         let expired = 0;
+        let restored = 0;
 
-        for (const [normalizedId, timestamp] of this.reservedJobIds.entries()) {
-            if (now - timestamp > CONFIG.PENDING_TIMEOUT_MS) {
+        for (const [normalizedId, reserved] of this.reservedJobIds.entries()) {
+            // Support both old format (timestamp) and new format (object)
+            const timestamp = reserved.timestamp || reserved;
+            const age = now - timestamp;
+            
+            if (age > CONFIG.PENDING_TIMEOUT_MS) {
                 this.reservedJobIds.delete(normalizedId);
                 expired++;
+                
+                // Restore server to available pool if not visited and we have server data
+                if (!this.isServerVisited(normalizedId) && reserved.serverData && !this.availableServers.has(normalizedId)) {
+                    this.availableServers.set(normalizedId, reserved.serverData);
+                    restored++;
+                }
             }
         }
 
         if (expired > 0) {
-            console.log(`[JobManager] Released ${expired} expired reserved servers back to pool`);
+            console.log(`[JobManager] Released ${expired} expired reserved servers (${restored} restored to pool)`);
         }
 
         return expired;
@@ -916,10 +954,20 @@ class JobManager {
      * @returns {Object} - Cache information object
      */
     getCacheInfo() {
+        // Count only non-expired reserved servers
+        let activeReserved = 0;
+        const now = Date.now();
+        for (const [normalizedId, reserved] of this.reservedJobIds.entries()) {
+            const timestamp = reserved.timestamp || reserved;
+            if (now - timestamp <= CONFIG.PENDING_TIMEOUT_MS) {
+                activeReserved++;
+            }
+        }
+        
         return {
             available: this.availableServers.size,
             visited: this.visitedJobIds.size,
-            reserved: this.reservedJobIds.size,
+            reserved: activeReserved,
             isFetching: this.isFetching,
             lastFetchTime: this.lastFetchTime
         };
