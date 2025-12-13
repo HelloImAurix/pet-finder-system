@@ -5,59 +5,48 @@ const https = require('https');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ============================================================================
-// CONFIGURATION
-// ============================================================================
-
 const CONFIG = {
     PLACE_ID: parseInt(process.env.PLACE_ID, 10) || 109983668079237,
     MAX_JOB_IDS: parseInt(process.env.MAX_JOB_IDS || '3000', 10),
     PAGES_TO_FETCH: parseInt(process.env.PAGES_TO_FETCH || '100', 10),
     DELAY_BETWEEN_REQUESTS: parseInt(process.env.DELAY_BETWEEN_REQUESTS || '100', 10),
     MIN_PLAYERS: parseInt(process.env.MIN_PLAYERS || '0', 10),
-    JOB_ID_MAX_AGE_MS: parseInt(process.env.JOB_ID_MAX_AGE_MS || '300000', 10), // 5 minutes
-    MIN_MPS_THRESHOLD: parseInt(process.env.MIN_MPS_THRESHOLD || '10000000', 10),
+    JOB_ID_MAX_AGE_MS: parseInt(process.env.JOB_ID_MAX_AGE_MS || '300000', 10),
     MAX_FINDS: parseInt(process.env.MAX_FINDS || '10000', 10),
     STORAGE_DURATION_HOURS: parseInt(process.env.STORAGE_DURATION_HOURS || '2', 10),
-    FULL_REFRESH_INTERVAL_MS: 600000, // 10 minutes
-    AUTO_REFRESH_INTERVAL_MS: 120000,  // 2 minutes
-    CLEANUP_INTERVAL_MS: 60000,       // 1 minute
-    PENDING_TIMEOUT_MS: 10000         // 10 seconds
+    FULL_REFRESH_INTERVAL_MS: 600000,
+    AUTO_REFRESH_INTERVAL_MS: 120000,
+    CLEANUP_INTERVAL_MS: 60000,
+    PENDING_TIMEOUT_MS: 10000,
+    VISITED_EXPIRY_MS: 30 * 60 * 1000
 };
 
 const API_KEY = process.env.BOT_API_KEY || 'sablujihub-bot';
 
-// ============================================================================
-// MIDDLEWARE
-// ============================================================================
-
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-// Authentication middleware
 function authenticate(req, res, next) {
     const apiKey = req.headers['x-api-key'] || req.headers['X-API-Key'];
-    if (apiKey === API_KEY) {
-        return next();
+    if (apiKey !== API_KEY) {
+        return res.status(401).json({ 
+            success: false, 
+            error: 'Unauthorized. Valid API key required.',
+            message: 'Please provide a valid X-API-Key header'
+        });
     }
-    return res.status(401).json({ 
-        success: false, 
-        error: 'Unauthorized. Valid API key required.',
-        message: 'Please provide a valid X-API-Key header'
-    });
+    next();
 }
 
-// Rate limiting middleware
 class RateLimiter {
     constructor() {
-        this.requests = new Map(); // ip -> { count, resetTime }
+        this.requests = new Map();
     }
 
     check(ip) {
         const now = Date.now();
-        const window = 60000; // 1 minute
+        const window = 60000;
         const maxRequests = 100;
-
         const record = this.requests.get(ip);
         
         if (!record || now > record.resetTime) {
@@ -103,91 +92,95 @@ function rateLimit(req, res, next) {
     next();
 }
 
-// Clean up rate limiter every minute
 setInterval(() => rateLimiter.cleanup(), 60000);
-
-// ============================================================================
-// PET FIND STORAGE
-// ============================================================================
 
 class PetFindStorage {
     constructor() {
         this.finds = [];
-        this.findMap = new Map(); // key -> find
+        this.findMap = new Map();
     }
 
     addFinds(findsData, accountName) {
         const results = { added: 0, skipped: 0, duplicates: 0, invalid: 0 };
         const now = Date.now();
-        const dedupWindow = 5 * 60 * 1000; // 5 minutes
+        const dedupWindow = 5 * 60 * 1000;
+        const finds = Array.isArray(findsData) ? findsData : [findsData];
 
-        for (const findData of findsData) {
-            // Filter by MPS threshold
-            const mps = parseFloat(findData.mps) || 0;
-            if (mps < CONFIG.MIN_MPS_THRESHOLD) {
-                results.skipped++;
-                continue;
-            }
-
-            // Validate required fields
-            if (!findData.petName || typeof findData.petName !== 'string' || !findData.petName.trim()) {
+        for (const findData of finds) {
+            if (!this.isValidFind(findData)) {
                 results.invalid++;
                 continue;
             }
 
-            // Create deduplication key
-            const uniqueId = String(findData.uniqueId || '').trim();
-            const key = `${findData.petName.trim()}_${findData.placeId || 0}_${String(findData.jobId || '').trim()}_${uniqueId}`;
+            const key = this.createFindKey(findData);
 
-            // Check for duplicates
-            if (this.findMap.has(key)) {
-                const existing = this.findMap.get(key);
-                const existingTime = this.getTimestamp(existing);
-                if (now - existingTime < dedupWindow) {
-                    results.duplicates++;
-                    continue;
-                }
+            if (this.isDuplicate(key, now, dedupWindow)) {
+                results.duplicates++;
+                continue;
             }
 
-            // Convert timestamp (Lua uses seconds, JS uses milliseconds)
-            let timestamp = findData.timestamp || now;
-            if (typeof timestamp === 'number' && timestamp < 10000000000) {
-                timestamp *= 1000;
-            }
-
-            // Create find object
-            const find = {
-                id: `${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-                petName: findData.petName.trim(),
-                generation: String(findData.generation || 'N/A'),
-                mps: mps,
-                rarity: String(findData.rarity || 'Unknown'),
-                mutation: String(findData.mutation || 'Normal'),
-                placeId: findData.placeId || 0,
-                jobId: String(findData.jobId || '').trim(),
-                accountName: String(findData.accountName || accountName || 'unknown').trim(),
-                timestamp: timestamp,
-                receivedAt: new Date().toISOString(),
-                uniqueId: uniqueId,
-                playerCount: parseInt(findData.playerCount) || 0,
-                maxPlayers: parseInt(findData.maxPlayers) || 6
-            };
-
-            // Add to storage
+            const find = this.createFindObject(findData, accountName, now);
             this.finds.unshift(find);
             this.findMap.set(key, find);
             results.added++;
 
-            // Maintain max size
             if (this.finds.length > CONFIG.MAX_FINDS) {
                 const removed = this.finds.pop();
-                const removedKey = `${removed.petName}_${removed.placeId}_${removed.jobId}_${removed.uniqueId}`;
+                const removedKey = this.createFindKey(removed);
                 this.findMap.delete(removedKey);
             }
         }
 
         this.cleanup();
         return results;
+    }
+
+    isValidFind(findData) {
+        return findData && 
+               findData.petName && 
+               typeof findData.petName === 'string' && 
+               findData.petName.trim().length > 0;
+    }
+
+    createFindKey(findData) {
+        const petName = String(findData.petName || '').trim();
+        const placeId = findData.placeId || 0;
+        const jobId = String(findData.jobId || '').trim();
+        const uniqueId = String(findData.uniqueId || '').trim();
+        return `${petName}_${placeId}_${jobId}_${uniqueId}`;
+    }
+
+    isDuplicate(key, now, dedupWindow) {
+        if (!this.findMap.has(key)) {
+            return false;
+        }
+        const existing = this.findMap.get(key);
+        const existingTime = this.getTimestamp(existing);
+        return (now - existingTime) < dedupWindow;
+    }
+
+    createFindObject(findData, accountName, now) {
+        let timestamp = findData.timestamp || now;
+        if (typeof timestamp === 'number' && timestamp < 10000000000) {
+            timestamp *= 1000;
+        }
+
+        return {
+            id: `${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+            petName: String(findData.petName).trim(),
+            generation: String(findData.generation || 'N/A'),
+            mps: parseFloat(findData.mps) || 0,
+            rarity: String(findData.rarity || 'Unknown'),
+            mutation: String(findData.mutation || 'Normal'),
+            placeId: findData.placeId || 0,
+            jobId: String(findData.jobId || '').trim(),
+            accountName: String(findData.accountName || accountName || 'unknown').trim(),
+            timestamp: timestamp,
+            receivedAt: new Date().toISOString(),
+            uniqueId: String(findData.uniqueId || '').trim(),
+            playerCount: parseInt(findData.playerCount) || 0,
+            maxPlayers: parseInt(findData.maxPlayers) || 6
+        };
     }
 
     getTimestamp(find) {
@@ -204,13 +197,12 @@ class PetFindStorage {
     cleanup() {
         const now = Date.now();
         const cutoff = now - (CONFIG.STORAGE_DURATION_HOURS * 60 * 60 * 1000);
-        
         const initialLength = this.finds.length;
         
         this.finds = this.finds.filter(find => {
             const timestamp = this.getTimestamp(find);
             if (timestamp <= cutoff) {
-                const key = `${find.petName}_${find.placeId}_${find.jobId}_${find.uniqueId}`;
+                const key = this.createFindKey(find);
                 this.findMap.delete(key);
                 return false;
             }
@@ -234,18 +226,15 @@ class PetFindStorage {
     getFinds(options = {}) {
         let results = [...this.finds];
         
-        // Filter by minimum MPS if specified
         if (options.minMps) {
             results = results.filter(f => f.mps >= options.minMps);
         }
         
-        // Filter by pet name if specified
         if (options.petName) {
             const searchName = options.petName.toLowerCase().trim();
             results = results.filter(f => f.petName.toLowerCase().includes(searchName));
         }
         
-        // Filter by time range if specified
         if (options.since) {
             const sinceTime = typeof options.since === 'number' 
                 ? (options.since < 10000000000 ? options.since * 1000 : options.since)
@@ -253,35 +242,51 @@ class PetFindStorage {
             results = results.filter(f => this.getTimestamp(f) >= sinceTime);
         }
         
-        // Sort by timestamp (newest first)
         results.sort((a, b) => this.getTimestamp(b) - this.getTimestamp(a));
         
-        // Limit results
         const limit = Math.min(options.limit || 100, 500);
-        results = results.slice(0, limit);
-        
-        return results;
+        return results.slice(0, limit);
     }
 }
 
 const petFindStorage = new PetFindStorage();
 
-// ============================================================================
-// JOB MANAGER
-// ============================================================================
-
 class JobManager {
     constructor() {
-        this.serverMap = new Map();      // normalizedId -> server data
-        this.usedJobIds = new Set();     // normalizedId (permanent blacklist)
-        this.pendingJobIds = new Map();  // normalizedId -> timestamp
+        this.availableServers = new Map();
+        this.visitedJobIds = new Map();
+        this.reservedJobIds = new Map();
         this.isFetching = false;
         this.lastFetchTime = 0;
-        this.fetchLock = false;
+        this.distributionLock = false;
     }
 
     normalizeJobId(jobId) {
         return String(jobId).trim().toLowerCase();
+    }
+
+    isServerVisited(normalizedId) {
+        if (!this.visitedJobIds.has(normalizedId)) {
+            return false;
+        }
+        const visitedTime = this.visitedJobIds.get(normalizedId);
+        const now = Date.now();
+        const age = now - visitedTime;
+        if (age > CONFIG.VISITED_EXPIRY_MS) {
+            this.visitedJobIds.delete(normalizedId);
+            return false;
+        }
+        return true;
+    }
+
+    isServerReserved(normalizedId) {
+        return this.reservedJobIds.has(normalizedId);
+    }
+
+    isServerAvailable(normalizedId) {
+        return !this.isServerVisited(normalizedId) && 
+               !this.isServerReserved(normalizedId) && 
+               this.availableServers.has(normalizedId);
     }
 
     async makeRequest(url) {
@@ -324,14 +329,12 @@ class JobManager {
         try {
             return await this.makeRequest(url);
         } catch (error) {
-            // Retry on rate limit
             if (error.message.includes('429') && retryCount < 5) {
                 const delay = Math.min(5000 * Math.pow(2, retryCount), 60000);
                 console.log(`[JobManager] Rate limited, retrying in ${delay}ms (${retryCount + 1}/5)`);
                 await new Promise(resolve => setTimeout(resolve, delay));
                 return this.fetchPage(cursor, retryCount + 1);
             }
-            // Retry on timeout
             if (error.message.includes('timeout') && retryCount < 3) {
                 await new Promise(resolve => setTimeout(resolve, 2000));
                 return this.fetchPage(cursor, retryCount + 1);
@@ -348,34 +351,45 @@ class JobManager {
         return 1;
     }
 
+    isValidServer(server) {
+        if (!server.id) return false;
+        
+        const players = server.playing || 0;
+        const maxPlayers = server.maxPlayers || 6;
+        
+        if (players < CONFIG.MIN_PLAYERS || players >= maxPlayers) {
+            return false;
+        }
+        
+        if (server.accessCode || server.PrivateServerId || server.privateServerId) {
+            return false;
+        }
+        
+        return true;
+    }
+
     async fetchBulkJobIds(forceRefresh = false) {
         if (this.isFetching) {
-            return { total: this.serverMap.size, added: 0 };
+            return { total: this.availableServers.size, added: 0 };
         }
 
         if (forceRefresh) {
-            console.log('[JobManager] Force refresh: Clearing cache...');
-            this.serverMap.clear();
-        } else if (this.serverMap.size >= CONFIG.MAX_JOB_IDS) {
-            return { total: this.serverMap.size, added: 0 };
+            console.log('[JobManager] Force refresh: Clearing available servers cache...');
+            this.availableServers.clear();
+        } else if (this.availableServers.size >= CONFIG.MAX_JOB_IDS) {
+            return { total: this.availableServers.size, added: 0 };
         }
 
         this.isFetching = true;
         let totalAdded = 0;
+        let totalSkipped = 0;
         let pagesFetched = 0;
         let cursor = null;
 
-        // Remove used servers from cache (if not force refresh)
-        if (!forceRefresh) {
-            for (const [jobId] of this.serverMap.entries()) {
-                if (this.usedJobIds.has(jobId)) {
-                    this.serverMap.delete(jobId);
-                }
-            }
-        }
+        this.removeVisitedServersFromPool();
 
         try {
-            while (pagesFetched < CONFIG.PAGES_TO_FETCH && this.serverMap.size < CONFIG.MAX_JOB_IDS) {
+            while (pagesFetched < CONFIG.PAGES_TO_FETCH && this.availableServers.size < CONFIG.MAX_JOB_IDS) {
                 const data = await this.fetchPage(cursor);
                 
                 if (!data?.data?.length) {
@@ -383,32 +397,28 @@ class JobManager {
                 }
 
                 const now = Date.now();
-                for (const server of data.data) {
-                    const jobId = server.id;
-                    if (!jobId) continue;
 
+                for (const server of data.data) {
+                    if (!this.isValidServer(server)) {
+                        continue;
+                    }
+
+                    const jobId = server.id;
                     const normalizedId = this.normalizeJobId(jobId);
 
-                    // Skip if used or already cached
-                    if (this.usedJobIds.has(normalizedId) || this.serverMap.has(normalizedId)) {
+                    if (this.isServerVisited(normalizedId)) {
+                        totalSkipped++;
+                        continue;
+                    }
+
+                    if (this.availableServers.has(normalizedId)) {
                         continue;
                     }
 
                     const players = server.playing || 0;
                     const maxPlayers = server.maxPlayers || 6;
 
-                    // Filter by player count
-                    if (players < CONFIG.MIN_PLAYERS || players >= maxPlayers) {
-                        continue;
-                    }
-
-                    // Skip private servers
-                    if (server.accessCode || server.PrivateServerId || server.privateServerId) {
-                        continue;
-                    }
-
-                    // Store server
-                    this.serverMap.set(normalizedId, {
+                    this.availableServers.set(normalizedId, {
                         id: jobId,
                         timestamp: now,
                         players: players,
@@ -422,7 +432,6 @@ class JobManager {
                 cursor = data.nextPageCursor;
                 pagesFetched++;
 
-                // Delay between pages
                 if (cursor && pagesFetched < CONFIG.PAGES_TO_FETCH) {
                     await new Promise(resolve => setTimeout(resolve, CONFIG.DELAY_BETWEEN_REQUESTS));
                 }
@@ -432,16 +441,29 @@ class JobManager {
             this.lastFetchTime = Date.now();
         }
 
-        console.log(`[JobManager] Fetched ${totalAdded} servers (total: ${this.serverMap.size})`);
-        return { total: this.serverMap.size, added: totalAdded };
+        console.log(`[JobManager] Fetched ${totalAdded} new servers, skipped ${totalSkipped} visited servers (total available: ${this.availableServers.size})`);
+        return { total: this.availableServers.size, added: totalAdded };
+    }
+
+    removeVisitedServersFromPool() {
+        let removed = 0;
+        for (const [normalizedId] of this.availableServers.entries()) {
+            if (this.isServerVisited(normalizedId)) {
+                this.availableServers.delete(normalizedId);
+                removed++;
+            }
+        }
+        if (removed > 0) {
+            console.log(`[JobManager] Removed ${removed} visited servers from available pool`);
+        }
     }
 
     getNextJob(currentJobId, count = 1) {
-        if (this.fetchLock) {
+        if (this.distributionLock) {
             return null;
         }
 
-        this.fetchLock = true;
+        this.distributionLock = true;
         try {
             this.cleanOldServers();
 
@@ -449,18 +471,18 @@ class JobManager {
             const now = Date.now();
             const candidates = [];
 
-            // Collect valid candidates
-            for (const [normalizedId, server] of this.serverMap.entries()) {
+            for (const [normalizedId, server] of this.availableServers.entries()) {
                 if (excludeId === normalizedId) continue;
-                if (this.usedJobIds.has(normalizedId)) continue;
-                if (this.pendingJobIds.has(normalizedId)) continue;
+                if (this.isServerVisited(normalizedId)) continue;
+                if (this.isServerReserved(normalizedId)) continue;
 
                 const age = now - (server.timestamp || 0);
                 if (age > CONFIG.JOB_ID_MAX_AGE_MS) continue;
 
                 candidates.push({
                     ...server,
-                    jobId: server.id
+                    jobId: server.id,
+                    normalizedId: normalizedId
                 });
             }
 
@@ -468,38 +490,30 @@ class JobManager {
                 return null;
             }
 
-            // Sort by priority, then player count
             candidates.sort((a, b) => {
-                if (a.priority !== b.priority) return b.priority - a.priority;
+                if (a.priority !== b.priority) {
+                    return b.priority - a.priority;
+                }
                 return (b.players || 0) - (a.players || 0);
             });
 
             const results = candidates.slice(0, count);
 
-            // Atomically mark as used and remove from cache
             for (const result of results) {
-                const normalizedId = this.normalizeJobId(result.id || result.jobId);
-                this.pendingJobIds.set(normalizedId, now);
-                this.serverMap.delete(normalizedId);
-                this.usedJobIds.add(normalizedId);
+                const normalizedId = result.normalizedId || this.normalizeJobId(result.id || result.jobId);
+                
+                this.availableServers.delete(normalizedId);
+                this.reservedJobIds.set(normalizedId, now);
             }
 
-            // Cleanup pending IDs after timeout
-            setTimeout(() => {
-                const cleanupTime = Date.now();
-                for (const [pendingId, pendingTime] of this.pendingJobIds.entries()) {
-                    if (cleanupTime - pendingTime > CONFIG.PENDING_TIMEOUT_MS) {
-                        this.pendingJobIds.delete(pendingId);
-                    }
-                }
-            }, CONFIG.PENDING_TIMEOUT_MS);
+            console.log(`[JobManager] Distributed ${results.length} server(s) to frontend (${this.availableServers.size} remaining)`);
 
             return count === 1 ? results[0] : results;
         } catch (error) {
             console.error('[JobManager] Error in getNextJob:', error);
             return null;
         } finally {
-            this.fetchLock = false;
+            this.distributionLock = false;
         }
     }
 
@@ -507,48 +521,89 @@ class JobManager {
         if (!jobIds) return 0;
 
         const ids = Array.isArray(jobIds) ? jobIds : [jobIds];
-        let marked = 0;
+        let newlyMarked = 0;
+        const now = Date.now();
 
         for (const jobId of ids) {
             if (!jobId) continue;
             const normalizedId = this.normalizeJobId(jobId);
 
-            if (!this.usedJobIds.has(normalizedId)) {
-                this.usedJobIds.add(normalizedId);
-                marked++;
+            if (this.isServerVisited(normalizedId)) {
+                continue;
             }
 
-            this.serverMap.delete(normalizedId);
-            this.pendingJobIds.delete(normalizedId);
+            this.visitedJobIds.set(normalizedId, now);
+            this.availableServers.delete(normalizedId);
+            this.reservedJobIds.delete(normalizedId);
+            newlyMarked++;
         }
 
-        return marked;
+        if (newlyMarked > 0) {
+            console.log(`[JobManager] Marked ${newlyMarked} server(s) as visited - will expire in 30 minutes (${this.visitedJobIds.size} total visited)`);
+        }
+
+        return newlyMarked;
     }
 
     cleanOldServers() {
         const now = Date.now();
         const maxAge = CONFIG.JOB_ID_MAX_AGE_MS;
+        let removedOld = 0;
 
-        // Clean old servers from cache
-        for (const [normalizedId, server] of this.serverMap.entries()) {
+        for (const [normalizedId, server] of this.availableServers.entries()) {
             if (now - server.timestamp > maxAge) {
-                this.serverMap.delete(normalizedId);
+                this.availableServers.delete(normalizedId);
+                removedOld++;
             }
         }
 
-        // Clean old pending IDs
-        for (const [normalizedId, timestamp] of this.pendingJobIds.entries()) {
+        if (removedOld > 0) {
+            console.log(`[JobManager] Cleaned ${removedOld} expired servers from available pool`);
+        }
+    }
+
+    cleanupReservedServers() {
+        const now = Date.now();
+        let expired = 0;
+
+        for (const [normalizedId, timestamp] of this.reservedJobIds.entries()) {
             if (now - timestamp > CONFIG.PENDING_TIMEOUT_MS) {
-                this.pendingJobIds.delete(normalizedId);
+                this.reservedJobIds.delete(normalizedId);
+                expired++;
             }
         }
+
+        if (expired > 0) {
+            console.log(`[JobManager] Released ${expired} expired reserved servers back to pool`);
+        }
+
+        return expired;
+    }
+
+    cleanupExpiredVisitedServers() {
+        const now = Date.now();
+        let expired = 0;
+
+        for (const [normalizedId, visitedTime] of this.visitedJobIds.entries()) {
+            const age = now - visitedTime;
+            if (age > CONFIG.VISITED_EXPIRY_MS) {
+                this.visitedJobIds.delete(normalizedId);
+                expired++;
+            }
+        }
+
+        if (expired > 0) {
+            console.log(`[JobManager] Removed ${expired} expired visited servers from blacklist (now available for reuse)`);
+        }
+
+        return expired;
     }
 
     getCacheInfo() {
         return {
-            count: this.serverMap.size,
-            usedCount: this.usedJobIds.size,
-            pendingCount: this.pendingJobIds.size,
+            available: this.availableServers.size,
+            visited: this.visitedJobIds.size,
+            reserved: this.reservedJobIds.size,
             isFetching: this.isFetching,
             lastFetchTime: this.lastFetchTime
         };
@@ -557,49 +612,39 @@ class JobManager {
 
 const jobManager = new JobManager();
 
-// ============================================================================
-// BACKGROUND TASKS
-// ============================================================================
-
-// Initial fetch on startup
 setImmediate(() => {
-    if (jobManager.serverMap.size < 500) {
+    if (jobManager.availableServers.size < 500) {
         jobManager.fetchBulkJobIds().catch(err => {
             console.error('[JobManager] Initial fetch error:', err.message);
         });
     }
 });
 
-// Auto-refresh when cache is low (every 2 minutes)
 setInterval(() => {
-    if (!jobManager.isFetching && jobManager.serverMap.size < CONFIG.MAX_JOB_IDS * 0.3) {
+    if (!jobManager.isFetching && jobManager.availableServers.size < CONFIG.MAX_JOB_IDS * 0.3) {
         jobManager.fetchBulkJobIds().catch(err => {
             console.error('[JobManager] Auto-refresh error:', err.message);
         });
     }
 }, CONFIG.AUTO_REFRESH_INTERVAL_MS);
 
-// Full cache refresh every 10 minutes
 setInterval(() => {
     if (!jobManager.isFetching) {
         console.log('[JobManager] Starting full cache refresh...');
         jobManager.fetchBulkJobIds(true).then(result => {
-            console.log(`[JobManager] Full refresh complete: ${result.added} servers added (total: ${result.total})`);
+            console.log(`[JobManager] Full refresh complete: ${result.added} servers added (total available: ${result.total})`);
         }).catch(err => {
             console.error('[JobManager] Full refresh error:', err.message);
         });
     }
 }, CONFIG.FULL_REFRESH_INTERVAL_MS);
 
-// Periodic cleanup
 setInterval(() => {
     jobManager.cleanOldServers();
+    jobManager.cleanupReservedServers();
+    jobManager.cleanupExpiredVisitedServers();
     petFindStorage.cleanup();
 }, CONFIG.CLEANUP_INTERVAL_MS);
-
-// ============================================================================
-// API ENDPOINTS
-// ============================================================================
 
 app.get('/health', (req, res) => {
     res.json({ 
@@ -657,8 +702,7 @@ app.get('/api/server/next', rateLimit, authenticate, (req, res) => {
         const result = jobManager.getNextJob(currentJobId, count);
 
         if (!result) {
-            // Trigger background refresh if cache is low
-            if (!jobManager.isFetching && jobManager.serverMap.size < 100) {
+            if (!jobManager.isFetching && jobManager.availableServers.size < 100) {
                 setImmediate(() => {
                     jobManager.fetchBulkJobIds().catch(() => {});
                 });
@@ -669,19 +713,17 @@ app.get('/api/server/next', rateLimit, authenticate, (req, res) => {
                 error: 'No servers available',
                 message: 'Cache is empty or refreshing. Please try again in a moment.',
                 retryAfter: 5,
-                cacheSize: jobManager.serverMap.size,
+                cacheSize: jobManager.availableServers.size,
                 isFetching: jobManager.isFetching
             });
         }
 
-        // Pre-fetch more jobs if cache is getting low
-        if (jobManager.serverMap.size < CONFIG.MAX_JOB_IDS * 0.3 && !jobManager.isFetching) {
+        if (jobManager.availableServers.size < CONFIG.MAX_JOB_IDS * 0.3 && !jobManager.isFetching) {
             setImmediate(() => {
                 jobManager.fetchBulkJobIds().catch(() => {});
             });
         }
 
-        // Return response
         if (count === 1) {
             res.json({
                 success: true,
@@ -788,19 +830,13 @@ app.get('/api/pets', rateLimit, authenticate, (req, res) => {
     }
 });
 
-// ============================================================================
-// SERVER STARTUP
-// ============================================================================
-
 const server = app.listen(PORT, () => {
     console.log(`[Server] Started on port ${PORT}`);
     console.log(`[Server] Place ID: ${CONFIG.PLACE_ID}`);
     console.log(`[Server] API Key: ${API_KEY.substring(0, 10)}...`);
     console.log(`[Server] Max Job IDs: ${CONFIG.MAX_JOB_IDS}`);
-    console.log(`[Server] Min MPS Threshold: ${CONFIG.MIN_MPS_THRESHOLD}`);
 });
 
-// Graceful shutdown
 function shutdown(signal) {
     console.log(`[Server] ${signal} received, shutting down gracefully...`);
     server.close(() => {
@@ -811,3 +847,4 @@ function shutdown(signal) {
 
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
+
