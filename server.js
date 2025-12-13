@@ -338,7 +338,8 @@ class PetFindStorage {
     }
 
     getFinds(options = {}) {
-        let results = [...this.finds];
+        // Apply filters directly without copying array first
+        let results = this.finds;
         
         if (options.minMps) {
             results = results.filter(f => f.mps >= options.minMps);
@@ -356,8 +357,10 @@ class PetFindStorage {
             results = results.filter(f => this.getTimestamp(f) >= sinceTime);
         }
         
+        // Sort by timestamp (most recent first)
         results.sort((a, b) => this.getTimestamp(b) - this.getTimestamp(a));
         
+        // Apply limit
         const limit = Math.min(options.limit || 100, 500);
         return results.slice(0, limit);
     }
@@ -440,28 +443,20 @@ class JobManager {
 
     /**
      * Check if a server is currently reserved (being distributed)
+     * Fast check without cleanup - cleanup should be done separately
      * 
      * @param {string} normalizedId - Normalized job ID
+     * @param {number} now - Current timestamp (optional, for performance)
      * @returns {boolean} - True if server is reserved
      */
-    isServerReserved(normalizedId) {
+    isServerReserved(normalizedId, now = null) {
         if (!this.reservedJobIds.has(normalizedId)) {
             return false;
         }
-        // Check if reservation has expired
         const reserved = this.reservedJobIds.get(normalizedId);
-        const now = Date.now();
-        const age = now - (reserved.timestamp || reserved); // Support both old format (timestamp) and new format (object)
-        
-        if (age > CONFIG.PENDING_TIMEOUT_MS) {
-            // Reservation expired - restore server to available pool if not visited
-            this.reservedJobIds.delete(normalizedId);
-            if (!this.isServerVisited(normalizedId) && reserved.serverData && !this.availableServers.has(normalizedId)) {
-                this.availableServers.set(normalizedId, reserved.serverData);
-            }
-            return false;
-        }
-        return true;
+        const timestamp = reserved.timestamp || reserved;
+        const currentTime = now || Date.now();
+        return (currentTime - timestamp) <= CONFIG.PENDING_TIMEOUT_MS;
     }
 
     /**
@@ -660,8 +655,13 @@ class JobManager {
                         continue;
                     }
 
-                    // Skip if already in pool or reserved
-                    if (this.availableServers.has(normalizedId) || this.isServerReserved(normalizedId)) {
+                    // Skip if already in pool
+                    if (this.availableServers.has(normalizedId)) {
+                        continue;
+                    }
+                    
+                    // Skip if reserved (fast check)
+                    if (this.isServerReserved(normalizedId, now)) {
                         continue;
                     }
 
@@ -702,17 +702,30 @@ class JobManager {
      * 
      * Called before fetching to ensure visited servers aren't in the pool.
      * This is a safety check in case visited servers somehow remain in availableServers.
+     * Optimized to batch deletions.
      */
     removeVisitedServersFromPool() {
-        let removed = 0;
+        const now = Date.now();
+        const visitedExpiry = CONFIG.VISITED_EXPIRY_MS;
+        const toRemove = [];
+        
+        // Collect servers to remove in one pass
         for (const [normalizedId] of this.availableServers.entries()) {
-            if (this.isServerVisited(normalizedId)) {
-                this.availableServers.delete(normalizedId);
-                removed++;
+            if (this.visitedJobIds.has(normalizedId)) {
+                const visitedTime = this.visitedJobIds.get(normalizedId);
+                if (now - visitedTime <= visitedExpiry) {
+                    toRemove.push(normalizedId);
+                }
             }
         }
-        if (removed > 0) {
-            console.log(`[JobManager] Removed ${removed} visited servers from available pool`);
+        
+        // Batch delete
+        for (const normalizedId of toRemove) {
+            this.availableServers.delete(normalizedId);
+        }
+        
+        if (toRemove.length > 0) {
+            console.log(`[JobManager] Removed ${toRemove.length} visited servers from available pool`);
         }
     }
 
@@ -725,7 +738,7 @@ class JobManager {
      * Process:
      * 1. Clean old/stale servers
      * 2. Filter candidates (exclude current, visited, reserved, stale)
-     * 3. Sort by priority (more players = higher priority)
+     * 3. Use partial sort for efficiency (only sort top N candidates)
      * 4. Atomically remove from pool and mark as reserved
      * 
      * @param {string|null} currentJobId - Current server to exclude from results
@@ -745,24 +758,42 @@ class JobManager {
 
             const excludeId = currentJobId ? this.normalizeJobId(currentJobId) : null;
             const now = Date.now();
+            const maxAge = CONFIG.JOB_ID_MAX_AGE_MS;
             const candidates = [];
+            const visitedSet = new Set(); // Cache visited checks
 
-            // Collect valid candidates
+            // Collect valid candidates with optimized checks
             for (const [normalizedId, server] of this.availableServers.entries()) {
-                // Skip if it's the current server
+                // Fast path: skip current server
                 if (excludeId === normalizedId) continue;
-                // Skip if visited (blacklisted)
-                if (this.isServerVisited(normalizedId)) continue;
-                // Skip if already reserved
-                if (this.isServerReserved(normalizedId)) continue;
-
-                // Skip if server data is too old
+                
+                // Fast path: skip stale servers
                 const age = now - (server.timestamp || 0);
-                if (age > CONFIG.JOB_ID_MAX_AGE_MS) continue;
+                if (age > maxAge) continue;
+                
+                // Check visited (with caching to avoid repeated checks)
+                if (visitedSet.has(normalizedId)) {
+                    continue;
+                }
+                if (this.isServerVisited(normalizedId)) {
+                    visitedSet.add(normalizedId);
+                    continue;
+                }
+                visitedSet.add(normalizedId); // Cache negative result
+                
+                // Check reserved (fast check without cleanup)
+                if (this.isServerReserved(normalizedId, now)) {
+                    continue;
+                }
 
+                // Valid candidate - add with minimal object creation
                 candidates.push({
-                    ...server,
+                    id: server.id,
                     jobId: server.id,
+                    players: server.players,
+                    maxPlayers: server.maxPlayers,
+                    timestamp: server.timestamp,
+                    priority: server.priority,
                     normalizedId: normalizedId
                 });
             }
@@ -771,38 +802,56 @@ class JobManager {
                 return null;
             }
 
-            // Sort by priority (higher priority first), then by player count
-            candidates.sort((a, b) => {
-                if (a.priority !== b.priority) {
-                    return b.priority - a.priority;
+            // Use partial sort: only sort if we need more than 1, or use efficient selection
+            if (count === 1 && candidates.length > 1) {
+                // Find best candidate without full sort
+                let best = candidates[0];
+                for (let i = 1; i < candidates.length; i++) {
+                    const candidate = candidates[i];
+                    if (candidate.priority > best.priority || 
+                        (candidate.priority === best.priority && candidate.players > best.players)) {
+                        best = candidate;
+                    }
                 }
-                return (b.players || 0) - (a.players || 0);
-            });
-
-            // Take top N candidates
-            const results = candidates.slice(0, count);
-
-            // Atomically remove from pool and mark as reserved
-            // This prevents the same server from being given to multiple users
-            // Store server data so it can be restored if reservation expires
-            for (const result of results) {
-                const normalizedId = result.normalizedId || this.normalizeJobId(result.id || result.jobId);
-                
-                // Get server data before removing from pool
+                const normalizedId = best.normalizedId;
                 const serverData = this.availableServers.get(normalizedId);
                 if (serverData) {
                     this.availableServers.delete(normalizedId);
-                    // Store both timestamp and server data for restoration
                     this.reservedJobIds.set(normalizedId, {
                         timestamp: now,
                         serverData: serverData
                     });
                 }
+                console.log(`[JobManager] Distributed 1 server to frontend (${this.availableServers.size} remaining)`);
+                return best;
+            } else {
+                // Sort by priority (higher priority first), then by player count
+                candidates.sort((a, b) => {
+                    if (a.priority !== b.priority) {
+                        return b.priority - a.priority;
+                    }
+                    return (b.players || 0) - (a.players || 0);
+                });
+
+                // Take top N candidates
+                const results = candidates.slice(0, count);
+
+                // Atomically remove from pool and mark as reserved
+                for (const result of results) {
+                    const normalizedId = result.normalizedId;
+                    const serverData = this.availableServers.get(normalizedId);
+                    if (serverData) {
+                        this.availableServers.delete(normalizedId);
+                        this.reservedJobIds.set(normalizedId, {
+                            timestamp: now,
+                            serverData: serverData
+                        });
+                    }
+                }
+
+                console.log(`[JobManager] Distributed ${results.length} server(s) to frontend (${this.availableServers.size} remaining)`);
+                return count === 1 ? results[0] : results;
             }
-
-            console.log(`[JobManager] Distributed ${results.length} server(s) to frontend (${this.availableServers.size} remaining)`);
-
-            return count === 1 ? results[0] : results;
         } catch (error) {
             console.error('[JobManager] Error in getNextJob:', error);
             return null;
@@ -954,12 +1003,15 @@ class JobManager {
      * @returns {Object} - Cache information object
      */
     getCacheInfo() {
-        // Count only non-expired reserved servers
+        // Count only non-expired reserved servers (optimized)
         let activeReserved = 0;
         const now = Date.now();
-        for (const [normalizedId, reserved] of this.reservedJobIds.entries()) {
+        const timeout = CONFIG.PENDING_TIMEOUT_MS;
+        
+        // Fast iteration with early exit optimization
+        for (const reserved of this.reservedJobIds.values()) {
             const timestamp = reserved.timestamp || reserved;
-            if (now - timestamp <= CONFIG.PENDING_TIMEOUT_MS) {
+            if (now - timestamp <= timeout) {
                 activeReserved++;
             }
         }
