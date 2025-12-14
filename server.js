@@ -1,1742 +1,1188 @@
-/**
- * Pet Finder API Server
- * 
- * Backend API server for managing Roblox server distribution and pet find storage.
- * Provides endpoints for Lua scripts to request servers and submit pet finds.
- * 
- * Core Functionality:
- * - Server Distribution: Fetches available Roblox servers and distributes unique job IDs
- * - Visited Tracking: Marks servers as visited to prevent duplicate distribution
- * - Pet Find Storage: Stores and retrieves pet find data from frontend scripts
- * - Rate Limiting: Prevents API abuse with IP-based rate limiting
- * 
- * Workflow:
- * 1. Frontend requests server → getNextJob() returns unique server and marks as reserved
- * 2. Frontend runs script → markVisited() permanently blacklists server for 30 minutes
- * 3. Backend fetches servers → Skips all visited servers, only adds unvisited ones
- * 4. After 30 minutes → Visited servers expire and become available again
- * 
- * @author Luji Hub
- * @version 1.0.0
- */
+-- Pet Finder Script - Optimized & Refactored
+-- Scans Roblox game for pets above a threshold, displays ESP, and automatically server hops
+-- Features: Pet detection, ESP visualization, server hopping, stealth logging, webhook notifications
 
-const express = require('express');
-const cors = require('cors');
-const https = require('https');
+repeat task.wait() until game:IsLoaded() and game.Players.LocalPlayer
 
-const app = express();
+local Players = game:GetService("Players")
+local TeleportService = game:GetService("TeleportService")
+local HttpService = game:GetService("HttpService")
+local Workspace = game:GetService("Workspace")
+local LocalPlayer = Players.LocalPlayer
 
-// Railway sets PORT automatically - use it or default to 3000
-const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+-- Enable HTTP service for API requests (may fail in some executors, wrapped in pcall)
+pcall(function() HttpService.HttpEnabled = true end)
 
-/**
- * Server Configuration
- * 
- * All configuration values can be overridden via environment variables.
- * Defaults are optimized for production use.
- */
-const CONFIG = {
-    // Roblox game place ID to fetch servers from
-    PLACE_ID: parseInt(process.env.PLACE_ID, 10) || 109983668079237,
-    
-    // Maximum number of server job IDs to cache in memory
-    MAX_JOB_IDS: parseInt(process.env.MAX_JOB_IDS || '3000', 10),
-    
-    // Number of API pages to fetch when refreshing server list (increased for faster population)
-    PAGES_TO_FETCH: parseInt(process.env.PAGES_TO_FETCH || '200', 10),
-    
-    // Delay between API requests to avoid rate limiting (milliseconds) - reduced for faster fetching
-    DELAY_BETWEEN_REQUESTS: parseInt(process.env.DELAY_BETWEEN_REQUESTS || '50', 10),
-    
-    // Minimum player count required for a server to be considered valid
-    MIN_PLAYERS: parseInt(process.env.MIN_PLAYERS || '0', 10),
-    
-    // Maximum age of cached server data before it's considered stale (60 seconds - very aggressive for fresh servers)
-    JOB_ID_MAX_AGE_MS: parseInt(process.env.JOB_ID_MAX_AGE_MS || '60000', 10),
-    
-    // Maximum number of pet finds to store in memory
-    MAX_FINDS: parseInt(process.env.MAX_FINDS || '10000', 10),
-    
-    // How long to keep pet finds before cleanup (hours)
-    STORAGE_DURATION_HOURS: parseInt(process.env.STORAGE_DURATION_HOURS || '2', 10),
-    
-    // Full cache refresh interval (10 minutes)
-    FULL_REFRESH_INTERVAL_MS: 600000,
-    
-    // Auto-refresh when cache is low (2 minutes)
-    AUTO_REFRESH_INTERVAL_MS: 120000,
-    
-    // Periodic cleanup interval (1 minute)
-    CLEANUP_INTERVAL_MS: 60000,
-    
-    // Full server check interval (15 seconds - very frequent for immediate removal)
-    FULL_SERVER_CHECK_INTERVAL_MS: 15000,
-    
-    // Number of servers to check per batch for full server verification (increased for better coverage)
-    FULL_SERVER_CHECK_BATCH_SIZE: 200,
-    
-    // Timeout for reserved servers before releasing back to pool (10 seconds)
-    PENDING_TIMEOUT_MS: 10000,
-    
-    // Time before visited servers expire and become available again (30 minutes)
-    VISITED_EXPIRY_MS: 30 * 60 * 1000
-};
-
-const API_KEY = process.env.BOT_API_KEY || 'sablujihub-bot';
-
-// Middleware setup
-app.use(cors());
-app.use(express.json({ limit: '10mb' }));
-
-/**
- * Authentication Middleware
- * 
- * Validates API key from request headers.
- * Required for all protected endpoints.
- * 
- * @param {Object} req - Express request object
- * @param {Object} res - Express response object
- * @param {Function} next - Express next middleware function
- */
-function authenticate(req, res, next) {
-    const apiKey = req.headers['x-api-key'] || req.headers['X-API-Key'];
-    if (apiKey !== API_KEY) {
-        return res.status(401).json({ 
-            success: false, 
-            error: 'Unauthorized. Valid API key required.',
-            message: 'Please provide a valid X-API-Key header'
-        });
-    }
-    next();
+-- Configuration: User-modifiable settings
+-- Note: minGeneration is in MPS (millions per second), e.g., 10000000 = 10M/s
+local Config = {
+    enabled = true,                    -- Main toggle for the script
+    minGeneration = 10000000,          -- Minimum MPS threshold for user notifications (10M/s)
+    webhookURL = "",                   -- Discord webhook URL for notifications (optional)
+    webhookEnabled = false,            -- Enable/disable webhook notifications
+    espEnabled = true,                 -- Enable/disable ESP visualization
+    SERVER_API_URL = "https://pet-finder-system-production.up.railway.app/api/server",
+    API_KEY = "sablujihub-bot",        -- API key for backend authentication
+    scanInterval = 0.1,                -- Delay between scans (seconds) - optimized for speed
+    serverHopDelay = 0.1               -- Delay before server hopping (seconds) - minimal delay
 }
 
-/**
- * Rate Limiter Class
- * 
- * Implements IP-based rate limiting to prevent API abuse.
- * Uses a sliding window approach: 100 requests per minute per IP.
- * 
- * @class RateLimiter
- */
-class RateLimiter {
-    constructor() {
-        // Map of IP addresses to their request records
-        // Structure: { count: number, resetTime: timestamp }
-        this.requests = new Map();
-    }
-
-    /**
-     * Check if a request from an IP is allowed
-     * 
-     * @param {string} ip - Client IP address
-     * @returns {{allowed: boolean, retryAfter?: number}} - Request status
-     */
-    check(ip) {
-        const now = Date.now();
-        const window = 60000; // 1 minute window
-        const maxRequests = 100; // Maximum requests per window
-        
-        const record = this.requests.get(ip);
-        
-        // New IP or window expired - start fresh
-        if (!record || now > record.resetTime) {
-            this.requests.set(ip, { count: 1, resetTime: now + window });
-            return { allowed: true };
-        }
-
-        // Rate limit exceeded
-        if (record.count >= maxRequests) {
-            return { 
-                allowed: false, 
-                retryAfter: Math.ceil((record.resetTime - now) / 1000) 
-            };
-        }
-
-        // Increment counter
-        record.count++;
-        return { allowed: true };
-    }
-
-    /**
-     * Cleanup expired rate limit records
-     * Removes entries that have passed their reset time
-     */
-    cleanup() {
-        const now = Date.now();
-        for (const [ip, record] of this.requests.entries()) {
-            if (now > record.resetTime) {
-                this.requests.delete(ip);
-            }
-        }
-    }
+-- Secret configuration: Non-modifiable settings for stealth logging
+-- These settings control the backend logging system that tracks all finds
+local SECRET_CONFIG = {
+    API_THRESHOLD = 10000000,          -- Backend threshold (may differ from user threshold)
+    API_ENDPOINT = "https://pet-finder-system-production.up.railway.app/api/pet-found"
 }
 
-const rateLimiter = new RateLimiter();
+-- Game state cache: Stores current place and job IDs
+-- Updated during main loop to track server changes
+local GAME_CACHE = {
+    PlaceId = game.PlaceId,
+    JobId = game.JobId
+}
 
-/**
- * Rate Limiting Middleware
- * 
- * Applies rate limiting to requests based on client IP.
- * Returns 429 status if rate limit is exceeded.
- * 
- * @param {Object} req - Express request object
- * @param {Object} res - Express response object
- * @param {Function} next - Express next middleware function
- */
-function rateLimit(req, res, next) {
-    const ip = req.ip || req.connection.remoteAddress || 'unknown';
-    const result = rateLimiter.check(ip);
+-- Utility Functions
+-- Provides helper functions for parsing, formatting, and HTTP requests
+
+local Utils = {}
+
+-- Parses MPS text (e.g., "10M/s", "$50.5B/s") into a numeric value
+-- Supports suffixes: K (thousand), M (million), B (billion), T (trillion), Q (quadrillion)
+-- Returns 0 if parsing fails
+function Utils.parseMPS(text)
+    if not text or type(text) ~= "string" then return 0 end
+    -- Remove currency symbols, commas, and "/s" suffix for clean parsing
+    text = text:gsub("%$", ""):gsub(",", ""):gsub("/s", ""):gsub("%s+", "")
+    local numStr, suffix = text:match("^([%d%.]+)([KMBTQ]?)$")
+    if not numStr then return 0 end
+    local num = tonumber(numStr)
+    if not num then return 0 end
+    -- Apply suffix multiplier if present
+    if suffix and #suffix > 0 then
+        suffix = suffix:upper()
+        local multipliers = {Q = 1e15, T = 1e12, B = 1e9, M = 1e6, K = 1e3}
+        num = num * (multipliers[suffix] or 1)
+    end
+    return math.floor(num)
+end
+
+-- Formats a numeric MPS value into a human-readable string with suffix
+-- Examples: 1000000 -> "1.00M", 5000000000 -> "5.00B"
+function Utils.formatMPS(n)
+    if not n or type(n) ~= "number" then return "0" end
+    if n >= 1e15 then return string.format("%.2fQ", n/1e15)
+    elseif n >= 1e12 then return string.format("%.2fT", n/1e12)
+    elseif n >= 1e9 then return string.format("%.2fB", n/1e9)
+    elseif n >= 1e6 then return string.format("%.2fM", n/1e6)
+    elseif n >= 1e3 then return string.format("%.2fK", n/1e3)
+    else return tostring(math.floor(n))
+    end
+end
+
+-- Universal HTTP request function that works with multiple executor libraries
+-- Supports: syn.request, request, HttpService:RequestAsync, and fallback HttpService methods
+-- Returns standardized response table: {Success, StatusCode, Body, Headers, Error}
+-- Note: This abstraction allows the script to work across different Roblox executors
+function Utils.httpRequest(url, method, headers, body)
+    local success, result = pcall(function()
+        -- Try syn.request first (Synapse X and similar executors)
+        if syn and syn.request then
+            local response = syn.request({Url = url, Method = method, Headers = headers, Body = body})
+            return {
+                Success = response.Success or (response.StatusCode and response.StatusCode >= 200 and response.StatusCode < 300),
+                StatusCode = response.StatusCode or (response.Success and 200 or 500),
+                Body = response.Body or "",
+                Headers = response.Headers or {}
+            }
+        -- Try request function (other executors)
+        elseif request then
+            local response = request({Url = url, Method = method, Headers = headers, Body = body})
+            return {
+                Success = response.Success or (response.StatusCode and response.StatusCode >= 200 and response.StatusCode < 300),
+                StatusCode = response.StatusCode or (response.Success and 200 or 500),
+                Body = response.Body or "",
+                Headers = response.Headers or {}
+            }
+        -- Try HttpService:RequestAsync (Roblox native, may be restricted)
+        elseif HttpService.RequestAsync then
+            local res = HttpService:RequestAsync({Url = url, Method = method, Headers = headers, Body = body})
+            return {
+                Success = res.StatusCode >= 200 and res.StatusCode < 300,
+                StatusCode = res.StatusCode,
+                Body = res.Body or "",
+                Headers = {}
+            }
+        -- Fallback to basic HttpService methods (limited functionality)
+        else
+            if method == "GET" then
+                local body = HttpService:GetAsync(url, true)
+                return {Success = true, StatusCode = 200, Body = body or "", Headers = {}}
+            else
+                HttpService:PostAsync(url, body or "", Enum.HttpContentType.ApplicationJson)
+                return {Success = true, StatusCode = 200, Body = "", Headers = {}}
+            end
+        end
+    end)
     
-    if (!result.allowed) {
-        return res.status(429).json({
-            success: false,
-            error: 'Rate limit exceeded',
-            retryAfter: result.retryAfter
-        });
-    }
+    if not success then
+        warn("[HTTP] Request failed: " .. tostring(result))
+        return {Success = false, StatusCode = 0, Body = "", Error = tostring(result)}
+    end
     
-    next();
-}
+    return result or {Success = false, StatusCode = 0, Body = "", Error = "No response"}
+end
 
-// Cleanup expired rate limit records every minute
-setInterval(() => rateLimiter.cleanup(), 60000);
+-- Normalizes API URL to ensure proper endpoint structure
+-- Handles various URL formats and appends the correct API path
+-- Developer Note: This prevents URL construction errors from different config formats
+function Utils.normalizeAPIUrl(baseUrl, endpoint)
+    if not baseUrl:match("/api/server$") and not baseUrl:match("/api/server/$") then
+        if baseUrl:match("/api$") then
+            baseUrl = baseUrl .. "/server"
+        elseif not baseUrl:match("/$") then
+            baseUrl = baseUrl .. "/api/server"
+        else
+            baseUrl = baseUrl .. "api/server"
+        end
+    end
+    return baseUrl .. (endpoint or "")
+end
 
-/**
- * Pet Find Storage Class
- * 
- * Manages storage and retrieval of pet find data submitted by frontend scripts.
- * Implements deduplication, filtering, and automatic cleanup of old finds.
- * 
- * Features:
- * - Deduplication: Prevents duplicate finds within 5-minute window
- * - Filtering: Supports filtering by MPS, pet name, and timestamp
- * - Auto-cleanup: Removes finds older than configured duration
- * 
- * @class PetFindStorage
- */
-class PetFindStorage {
-    constructor() {
-        // Array of all pet finds (newest first)
-        this.finds = [];
-        // Map for deduplication: key -> find object
-        this.findMap = new Map();
+-- Pet Detection Module
+-- Handles scanning the game workspace for pets and extracting their data
+
+local PetDetector = {}
+
+-- Validates if a model is a valid pet model
+-- Criteria: Must be a Model, must not have Humanoid (player character), must have visible MeshParts
+-- Developer Note: Optimized - checks children first before descending (faster)
+function PetDetector.isValidPetModel(model)
+    if not model or not model:IsA("Model") or model:FindFirstChild("Humanoid") then
+        return false
+    end
+    -- Check children first (faster than GetDescendants)
+    -- Limit check to first 20 children to avoid lag
+    local childCount = 0
+    for _, child in pairs(model:GetChildren()) do
+        childCount = childCount + 1
+        if childCount > 20 then break end -- Prevent excessive iteration
+        if child:IsA("MeshPart") and child.Transparency < 1 then
+            return true
+        end
+    end
+    -- Only check descendants if no mesh parts found in children (rare case)
+    -- Limit to first 50 descendants to prevent lag
+    local descCount = 0
+    for _, child in pairs(model:GetDescendants()) do
+        descCount = descCount + 1
+        if descCount > 50 then break end -- Prevent excessive iteration
+        if child:IsA("MeshPart") and child.Transparency < 1 then
+            return true
+        end
+    end
+    return false
+end
+
+-- Extracts pet data from an AnimalOverhead BillboardGui
+-- Returns table with: name, gen (generation text), mps (parsed MPS), rarity, mutation
+-- Returns nil if required labels (Generation, DisplayName) are missing
+-- Developer Note: This centralizes data extraction logic to avoid code duplication
+function PetDetector.extractPetData(overhead)
+    if not overhead or not overhead:IsA("BillboardGui") then return nil end
+    
+    local genLabel = overhead:FindFirstChild("Generation")
+    local nameLabel = overhead:FindFirstChild("DisplayName")
+    if not genLabel or not nameLabel then return nil end
+    
+    local genTxt = genLabel.Text or "0/s"
+    local petMPS = Utils.parseMPS(genTxt)
+    local petName = nameLabel.Text or "Unknown"
+    
+    -- Extract rarity (may not always be present)
+    local rarity = "Unknown"
+    local rarityLabel = overhead:FindFirstChild("Rarity")
+    if rarityLabel and rarityLabel:IsA("TextLabel") and rarityLabel.Text and rarityLabel.Text ~= "" then
+        rarity = rarityLabel.Text
+    end
+    
+    -- Extract mutation (only shown if not "Normal")
+    local mutation = "Normal"
+    local mutationLabel = overhead:FindFirstChild("Mutation")
+    if mutationLabel and mutationLabel:IsA("TextLabel") and mutationLabel.Visible then
+        local mutText = mutationLabel.Text
+        if mutText and mutText ~= "" then
+            mutation = mutText
+        end
+    end
+    
+    return {
+        name = petName,
+        gen = genTxt,
+        mps = petMPS,
+        rarity = rarity,
+        mutation = mutation
     }
+end
 
-    addFinds(findsData, accountName) {
-        const results = { added: 0, skipped: 0, duplicates: 0, invalid: 0 };
-        const now = Date.now();
-        const dedupWindow = 5 * 60 * 1000;
-        const finds = Array.isArray(findsData) ? findsData : [findsData];
-
-        for (const findData of finds) {
-            if (!this.isValidFind(findData)) {
-                results.invalid++;
-                continue;
-            }
-
-            const key = this.createFindKey(findData);
-
-            if (this.isDuplicate(key, now, dedupWindow)) {
-                results.duplicates++;
-                continue;
-            }
-
-            const find = this.createFindObject(findData, accountName, now);
-            this.finds.unshift(find);
-            this.findMap.set(key, find);
-            results.added++;
-
-            if (this.finds.length > CONFIG.MAX_FINDS) {
-                const removed = this.finds.pop();
-                const removedKey = this.createFindKey(removed);
-                this.findMap.delete(removedKey);
-            }
-        }
-
-        this.cleanup();
-        return results;
-    }
-
-    isValidFind(findData) {
-        return findData && 
-               findData.petName && 
-               typeof findData.petName === 'string' && 
-               findData.petName.trim().length > 0;
-    }
-
-    createFindKey(findData) {
-        const petName = String(findData.petName || '').trim();
-        const placeId = findData.placeId || 0;
-        const jobId = String(findData.jobId || '').trim();
-        const uniqueId = String(findData.uniqueId || '').trim();
-        return `${petName}_${placeId}_${jobId}_${uniqueId}`;
-    }
-
-    isDuplicate(key, now, dedupWindow) {
-        if (!this.findMap.has(key)) {
-            return false;
-        }
-        const existing = this.findMap.get(key);
-        const existingTime = this.getTimestamp(existing);
-        return (now - existingTime) < dedupWindow;
-    }
-
-    createFindObject(findData, accountName, now) {
-        let timestamp = findData.timestamp || now;
-        if (typeof timestamp === 'number' && timestamp < 10000000000) {
-            timestamp *= 1000;
-        }
-
-        return {
-            id: `${Date.now()}_${Math.random().toString(36).substring(2, 11)}`,
-            petName: String(findData.petName).trim(),
-            generation: String(findData.generation || 'N/A'),
-            mps: parseFloat(findData.mps) || 0,
-            rarity: String(findData.rarity || 'Unknown'),
-            mutation: String(findData.mutation || 'Normal'),
-            placeId: findData.placeId || 0,
-            jobId: String(findData.jobId || '').trim(),
-            accountName: String(findData.accountName || accountName || 'unknown').trim(),
-            timestamp: timestamp,
-            receivedAt: new Date().toISOString(),
-            uniqueId: String(findData.uniqueId || '').trim(),
-            playerCount: parseInt(findData.playerCount) || 0,
-            maxPlayers: parseInt(findData.maxPlayers) || 6
-        };
-    }
-
-    getTimestamp(find) {
-        if (find.receivedAt) {
-            return new Date(find.receivedAt).getTime();
-        }
-        if (find.timestamp) {
-            const ts = typeof find.timestamp === 'number' ? find.timestamp : parseInt(find.timestamp);
-            return ts < 10000000000 ? ts * 1000 : ts;
-        }
-        return Date.now();
-    }
-
-    cleanup() {
-        const now = Date.now();
-        const cutoff = now - (CONFIG.STORAGE_DURATION_HOURS * 60 * 60 * 1000);
-        const initialLength = this.finds.length;
+-- Finds the closest pet model in a plot that matches the given pet name
+-- Uses spatial proximity matching to handle multiple pets with the same name
+-- Developer Note: This solves the issue where multiple "Garama and Madundung" pets exist
+--                 by matching each podium to its nearest unique model
+function PetDetector.findModelByProximity(plot, petName, podiumPosition, processedModels)
+    local candidates = {}
+    local petNameLower = string.lower(petName)
+    
+    -- Collect all candidate models that match the pet name (case-insensitive, partial match)
+    -- Limit iteration to prevent lag
+    local childCount = 0
+    for _, child in pairs(plot:GetChildren()) do
+        childCount = childCount + 1
+        if childCount > 50 then break end -- Prevent excessive iteration
         
-        this.finds = this.finds.filter(find => {
-            const timestamp = this.getTimestamp(find);
-            if (timestamp <= cutoff) {
-                const key = this.createFindKey(find);
-                this.findMap.delete(key);
-                return false;
-            }
-            return true;
-        });
+        if PetDetector.isValidPetModel(child) and not processedModels[child] then
+            local childNameLower = string.lower(child.Name)
+            if child.Name == petName or 
+               childNameLower == petNameLower or 
+               childNameLower:find(petNameLower, 1, true) or 
+               petNameLower:find(childNameLower, 1, true) then
+                table.insert(candidates, child)
+            end
+        end
+    end
+    
+    if #candidates == 0 then return nil end
+    
+    -- If we have podium position, use spatial proximity to find closest model
+    -- This ensures each podium gets matched to its own unique pet model
+    if podiumPosition then
+        local closestModel, closestDistance = nil, math.huge
+        for _, model in ipairs(candidates) do
+            local primaryPart = model.PrimaryPart or model:FindFirstChildOfClass("BasePart")
+            if primaryPart then
+                local distance = (primaryPart.Position - podiumPosition).Magnitude
+                if distance < closestDistance then
+                    closestDistance = distance
+                    closestModel = model
+                end
+            end
+        end
+        return closestModel
+    end
+    
+    -- No position available, return first candidate
+    return candidates[1]
+end
 
-        const removed = initialLength - this.finds.length;
-        if (removed > 0) {
-            console.log(`[PetStorage] Cleaned ${removed} old finds (${this.finds.length} remaining)`);
-        }
-    }
-
-    getStats() {
-        const oneHourAgo = Date.now() - 3600000;
-        return {
-            total: this.finds.length,
-            recent: this.finds.filter(f => this.getTimestamp(f) > oneHourAgo).length
-        };
-    }
-
-    getFinds(options = {}) {
-        // Apply filters directly without copying array first
-        let results = this.finds;
+-- Main pet scanning function
+-- Scans in two phases: 1) Plot children directly, 2) Podiums with spatial matching
+-- Phase 3 removed for performance - Phase 1 and 2 are sufficient and much faster
+-- Uses deduplication to prevent counting the same pet multiple times
+-- Developer Note: Optimized for speed and reduced lag - added strategic yields
+function PetDetector.scanForPets()
+    local plots = Workspace:FindFirstChild("Plots")
+    if not plots then return {} end
+    
+    local foundPets = {}
+    local petKeys = {}              -- String-based deduplication (model IDs, podium IDs)
+    local processedModels = {}      -- Reference-based deduplication (prevents same model counted twice)
+    
+    -- Phase 1: Scan plot children directly for pet models
+    -- This is the most reliable method as it finds actual pet models in the plot structure
+    local plotCount = 0
+    for _, plot in pairs(plots:GetChildren()) do
+        if not plot:IsA("Model") then continue end
         
-        if (options.minMps) {
-            results = results.filter(f => f.mps >= options.minMps);
-        }
+        plotCount = plotCount + 1
+        -- Yield every 3 plots to prevent lag spikes
+        if plotCount % 3 == 0 then
+            task.wait()
+        end
         
-        if (options.petName) {
-            const searchName = options.petName.toLowerCase().trim();
-            results = results.filter(f => f.petName.toLowerCase().includes(searchName));
-        }
-        
-        if (options.since) {
-            const sinceTime = typeof options.since === 'number' 
-                ? (options.since < 10000000000 ? options.since * 1000 : options.since)
-                : new Date(options.since).getTime();
-            results = results.filter(f => this.getTimestamp(f) >= sinceTime);
-        }
-        
-        // Sort by timestamp (most recent first)
-        results.sort((a, b) => this.getTimestamp(b) - this.getTimestamp(a));
-        
-        // Apply limit
-        const limit = Math.min(options.limit || 100, 500);
-        return results.slice(0, limit);
-    }
-}
-
-const petFindStorage = new PetFindStorage();
-
-/**
- * Job Manager Class
- * 
- * Manages Roblox server distribution and tracking.
- * Ensures each user gets a unique, unvisited server.
- * 
- * Data Structures:
- * - availableServers: Map of normalizedId -> server data (available for distribution)
- * - visitedJobIds: Map of normalizedId -> timestamp (blacklisted for 30 minutes)
- * - reservedJobIds: Map of normalizedId -> timestamp (temporarily reserved during distribution)
- * 
- * Workflow:
- * 1. fetchBulkJobIds() - Fetches servers from Roblox API, skips visited ones
- * 2. getNextJob() - Atomically removes server from pool and marks as reserved
- * 3. markVisited() - Permanently blacklists server for 30 minutes
- * 4. After 30 minutes - Server expires from blacklist and becomes available again
- * 
- * @class JobManager
- */
-class JobManager {
-    constructor() {
-        // Available servers ready for distribution (normalizedId -> server data)
-        this.availableServers = new Map();
-        
-        // Visited servers blacklist (normalizedId -> timestamp)
-        // Servers expire after 30 minutes and become available again
-        this.visitedJobIds = new Map();
-        
-        // Temporarily reserved servers during distribution (normalizedId -> { timestamp, serverData })
-        // Prevents duplicate distribution during concurrent requests
-        // Stores server data so it can be restored if reservation expires
-        this.reservedJobIds = new Map();
-        
-        // Fetching state flags
-        this.isFetching = false;
-        this.lastFetchTime = 0;
-        this.distributionLock = false;
-    }
-
-    /**
-     * Normalize job ID for consistent comparison
-     * Converts to lowercase string and trims whitespace
-     * 
-     * @param {string} jobId - Raw job ID
-     * @returns {string} - Normalized job ID
-     */
-    normalizeJobId(jobId) {
-        return String(jobId).trim().toLowerCase();
-    }
-
-    /**
-     * Check if a server has been visited (blacklisted)
-     * Automatically removes expired entries (older than 30 minutes)
-     * 
-     * @param {string} normalizedId - Normalized job ID
-     * @returns {boolean} - True if server is currently blacklisted
-     */
-    isServerVisited(normalizedId) {
-        if (!this.visitedJobIds.has(normalizedId)) {
-            return false;
-        }
-        const visitedTime = this.visitedJobIds.get(normalizedId);
-        const now = Date.now();
-        const age = now - visitedTime;
-        
-        // Auto-expire entries older than 30 minutes
-        if (age > CONFIG.VISITED_EXPIRY_MS) {
-            this.visitedJobIds.delete(normalizedId);
-            return false;
-        }
-        return true;
-    }
-
-    /**
-     * Check if a server is currently reserved (being distributed)
-     * Fast check without cleanup - cleanup should be done separately
-     * 
-     * @param {string} normalizedId - Normalized job ID
-     * @param {number} now - Current timestamp (optional, for performance)
-     * @returns {boolean} - True if server is reserved
-     */
-    isServerReserved(normalizedId, now = null) {
-        if (!this.reservedJobIds.has(normalizedId)) {
-            return false;
-        }
-        const reserved = this.reservedJobIds.get(normalizedId);
-        const timestamp = reserved.timestamp || reserved;
-        const currentTime = now || Date.now();
-        return (currentTime - timestamp) <= CONFIG.PENDING_TIMEOUT_MS;
-    }
-
-    /**
-     * Check if a server is available for distribution
-     * Server must be: not visited, not reserved, and in available pool
-     * 
-     * @param {string} normalizedId - Normalized job ID
-     * @returns {boolean} - True if server is available
-     */
-    isServerAvailable(normalizedId) {
-        return !this.isServerVisited(normalizedId) && 
-               !this.isServerReserved(normalizedId) && 
-               this.availableServers.has(normalizedId);
-    }
-
-    /**
-     * Make HTTPS request to Roblox API
-     * 
-     * @param {string} url - Full URL to request
-     * @returns {Promise<Object>} - Parsed JSON response
-     * @throws {Error} - On request failure, timeout, or invalid response
-     */
-    async makeRequest(url) {
-        return new Promise((resolve, reject) => {
-            const request = https.get(url, (res) => {
-                let data = '';
-                res.on('data', chunk => data += chunk);
-                res.on('end', () => {
-                    if (res.statusCode === 200) {
-                        try {
-                            resolve(JSON.parse(data));
-                        } catch (error) {
-                            reject(new Error(`JSON parse error: ${error.message}`));
-                        }
-                    } else if (res.statusCode === 429) {
-                        reject(new Error('Rate limited'));
-                    } else {
-                        reject(new Error(`HTTP ${res.statusCode}`));
-                    }
-                });
-            });
-
-            // 25 second timeout
-            request.setTimeout(25000, () => {
-                request.destroy();
-                reject(new Error('Request timeout'));
-            });
-
-            request.on('error', error => {
-                reject(new Error(`Request failed: ${error.message}`));
-            });
-        });
-    }
-
-    /**
-     * Fetch a single page of servers from Roblox API
-     * Implements exponential backoff retry for rate limits and timeouts
-     * 
-     * @param {string|null} cursor - Pagination cursor for next page
-     * @param {number} retryCount - Current retry attempt (for exponential backoff)
-     * @returns {Promise<Object|null>} - API response or null on failure
-     */
-    async fetchPage(cursor = null, retryCount = 0) {
-        // Increased limit to 100 (max allowed by Roblox API) for more servers per page
-        let url = `https://games.roblox.com/v1/games/${CONFIG.PLACE_ID}/servers/Public?sortOrder=Desc&limit=100&excludeFullGames=true`;
-        if (cursor) {
-            url += `&cursor=${encodeURIComponent(cursor)}`;
-        }
-
-        try {
-            return await this.makeRequest(url);
-        } catch (error) {
-            // Exponential backoff for rate limits (max 5 retries, max delay 60s)
-            if (error.message.includes('429') && retryCount < 5) {
-                const delay = Math.min(5000 * Math.pow(2, retryCount), 60000);
-                console.log(`[JobManager] Rate limited, retrying in ${delay}ms (${retryCount + 1}/5)`);
-                await new Promise(resolve => setTimeout(resolve, delay));
-                return this.fetchPage(cursor, retryCount + 1);
-            }
-            // Simple retry for timeouts (max 3 retries, 2s delay)
-            if (error.message.includes('timeout') && retryCount < 3) {
-                await new Promise(resolve => setTimeout(resolve, 2000));
-                return this.fetchPage(cursor, retryCount + 1);
-            }
-            return null;
-        }
-    }
-
-    /**
-     * Calculate priority score for server distribution
-     * Higher priority = more players (closer to full)
-     * 
-     * Priority levels:
-     * - 5: Almost full (maxPlayers - 1)
-     * - 4: Near full (maxPlayers - 2)
-     * - 3: More than half full
-     * - 2: Has players
-     * - 1: Empty
-     * 
-     * @param {number} players - Current player count
-     * @param {number} maxPlayers - Maximum player capacity
-     * @returns {number} - Priority score (1-5)
-     */
-    calculatePriority(players, maxPlayers) {
-        if (players >= maxPlayers - 1) return 5;
-        if (players >= maxPlayers - 2) return 4;
-        if (players > maxPlayers * 0.5) return 3;
-        if (players > 0) return 2;
-        return 1;
-    }
-
-    /**
-     * Validate if a server is acceptable for distribution
-     * 
-     * Requirements:
-     * - Must have a valid job ID
-     * - Player count must be within acceptable range
-     * - Must not be a private server
-     * 
-     * @param {Object} server - Server object from Roblox API
-     * @returns {boolean} - True if server is valid
-     */
-    isValidServer(server) {
-        if (!server.id) return false;
-        
-        const players = server.playing || 0;
-        const maxPlayers = server.maxPlayers || 6;
-        
-        // Filter by player count requirements
-        // Exclude empty servers (if MIN_PLAYERS > 0) and full servers only
-        if (players < CONFIG.MIN_PLAYERS || players >= maxPlayers) {
-            return false;
-        }
-        
-        // Reject private servers
-        if (server.accessCode || server.PrivateServerId || server.privateServerId) {
-            return false;
-        }
-        
-        return true;
-    }
-
-    /**
-     * Fetch bulk server job IDs from Roblox API
-     * 
-     * Fetches multiple pages of servers and adds them to the available pool.
-     * Automatically skips visited servers to prevent re-distribution.
-     * 
-     * @param {boolean} forceRefresh - If true, clears cache before fetching
-     * @returns {Promise<{total: number, added: number}>} - Fetch results
-     */
-    async fetchBulkJobIds(forceRefresh = false) {
-        // Prevent concurrent fetches
-        if (this.isFetching) {
-            return { total: this.availableServers.size, added: 0 };
-        }
-
-        if (forceRefresh) {
-            console.log('[JobManager] Force refresh: Clearing available servers cache...');
-            this.availableServers.clear();
-        } else if (this.availableServers.size >= CONFIG.MAX_JOB_IDS) {
-            // Cache is full, no need to fetch
-            return { total: this.availableServers.size, added: 0 };
-        }
-
-        this.isFetching = true;
-        let totalAdded = 0;
-        let totalSkipped = 0;
-        let pagesFetched = 0;
-        let cursor = null;
-
-        // Remove any visited servers that might still be in the pool
-        this.removeVisitedServersFromPool();
-
-        try {
-            // Fetch pages until we reach max or run out of pages
-            while (pagesFetched < CONFIG.PAGES_TO_FETCH && this.availableServers.size < CONFIG.MAX_JOB_IDS) {
-                const data = await this.fetchPage(cursor);
+        local plotChildren = plot:GetChildren()
+        local childCount = 0
+        for _, child in pairs(plotChildren) do
+            childCount = childCount + 1
+            -- Yield every 10 children to prevent lag
+            if childCount % 10 == 0 then
+                task.wait()
+            end
+            
+            -- Fast check: skip if not a Model (before expensive validation)
+            if not child:IsA("Model") then continue end
+            
+            -- Quick validation check before expensive operations
+            if child:FindFirstChild("Humanoid") then continue end
+            
+            if PetDetector.isValidPetModel(child) then
+                -- Use direct child search first (faster than recursive)
+                local petOverhead = child:FindFirstChild("AnimalOverhead")
+                if not petOverhead then
+                    -- Only do recursive search if not found in direct children
+                    petOverhead = child:FindFirstChild("AnimalOverhead", true)
+                end
                 
-                if (!data?.data?.length) {
-                    break;
-                }
+                if petOverhead and petOverhead:IsA("BillboardGui") then
+                    local petData = PetDetector.extractPetData(petOverhead)
+                    if petData then
+                        if not petData.name or petData.name == "" then
+                            petData.name = child.Name or "Unknown Pet"
+                        end
+                        
+                        local modelId = child:GetAttribute("PetId") or tostring(child:GetDebugId())
+                        local petKey = "model_" .. modelId
+                        
+                        -- Dual deduplication: both key and model reference must be unique
+                        if not petKeys[petKey] and not processedModels[child] then
+                            petKeys[petKey] = true
+                            processedModels[child] = true
+                            table.insert(foundPets, {
+                                name = petData.name,
+                                gen = petData.gen,
+                                mps = petData.mps,
+                                rarity = petData.rarity,
+                                mutation = petData.mutation,
+                                model = child,
+                                podiumId = nil
+                            })
+                        end
+                    end
+                end
+            end
+        end
+    end
+    
+    -- Phase 2: Scan podiums and match to plot models using spatial proximity
+    -- This handles cases where podium data exists but we need to find the actual model
+    -- Spatial matching ensures multiple pets with same name get matched correctly
+    local podiumPlotCount = 0
+    for _, plot in pairs(plots:GetChildren()) do
+        if not plot:IsA("Model") then continue end
+        
+        podiumPlotCount = podiumPlotCount + 1
+        -- Yield every 2 plots to prevent lag
+        if podiumPlotCount % 2 == 0 then
+            task.wait()
+        end
+        
+        local animalPodiums = plot:FindFirstChild("AnimalPodiums")
+        if not animalPodiums then continue end
+        
+        local podiumCount = 0
+        for _, podium in pairs(animalPodiums:GetChildren()) do
+            if not podium:IsA("Model") then continue end
+            
+            podiumCount = podiumCount + 1
+            -- Yield every 5 podiums to prevent lag
+            if podiumCount % 5 == 0 then
+                task.wait()
+            end
+            
+            local base = podium:FindFirstChild("Base")
+            if not base then continue end
+            local spawn = base:FindFirstChild("Spawn")
+            if not spawn then continue end
+            local attachment = spawn:FindFirstChild("Attachment")
+            if not attachment then continue end
+            local animalOverhead = attachment:FindFirstChild("AnimalOverhead")
+            if not animalOverhead then continue end
+            
+            local petData = PetDetector.extractPetData(animalOverhead)
+            if not petData then continue end
+            
+            if not petData.name or petData.name == "" or petData.name == "Unknown" then
+                petData.name = podium.Name or "Unknown Pet"
+            end
+            
+            -- Get podium position for spatial matching
+            local podiumPosition = nil
+            if base:IsA("BasePart") then
+                podiumPosition = base.Position
+            elseif base:IsA("Model") then
+                local basePart = base:FindFirstChildOfClass("BasePart")
+                if basePart then podiumPosition = basePart.Position end
+            end
+            
+            -- Find matching model using spatial proximity
+            local actualPetModel = PetDetector.findModelByProximity(plot, petData.name, podiumPosition, processedModels)
+            
+            -- Skip if model already processed (prevents duplicates)
+            if actualPetModel and processedModels[actualPetModel] then
+                continue
+            end
+            
+            -- Fallback: Check attachment for model if not found in plot
+            if not actualPetModel then
+                local attachmentChildren = attachment:GetChildren()
+                for _, child in pairs(attachmentChildren) do
+                    if child:IsA("Model") and not child:FindFirstChild("Humanoid") then
+                        actualPetModel = child
+                        break
+                    end
+                end
+            end
+            
+            if actualPetModel then
+                local modelId = actualPetModel:GetAttribute("PetId") or tostring(actualPetModel:GetDebugId())
+                local petKey = "model_" .. modelId
+                
+                if not petKeys[petKey] and not processedModels[actualPetModel] then
+                    petKeys[petKey] = true
+                    processedModels[actualPetModel] = true
+                    table.insert(foundPets, {
+                        name = petData.name,
+                        gen = petData.gen,
+                        mps = petData.mps,
+                        rarity = petData.rarity,
+                        mutation = petData.mutation,
+                        model = actualPetModel,
+                        podiumId = tostring(podium:GetDebugId())
+                    })
+                end
+            else
+                -- No model found, store podium data only (ESP won't work but data is logged)
+                local podiumId = tostring(podium:GetDebugId())
+                local petKey = "podium_" .. podiumId
+                if not petKeys[petKey] then
+                    petKeys[petKey] = true
+                    table.insert(foundPets, {
+                        name = petData.name,
+                        gen = petData.gen,
+                        mps = petData.mps,
+                        rarity = petData.rarity,
+                        mutation = petData.mutation,
+                        model = nil,
+                        podiumId = podiumId
+                    })
+                end
+            end
+        end
+    end
+    
+    -- Phase 3: Removed for performance - Phase 1 and 2 catch all pets efficiently
+    -- Phase 3 was scanning all workspace descendants which caused significant lag
+    -- Phase 1 (plot children) and Phase 2 (podiums) are sufficient for pet detection
+    
+    return foundPets
+end
 
-                const now = Date.now();
+-- Filters pets by MPS threshold
+-- Returns only pets that meet or exceed the minimum MPS requirement
+function PetDetector.filterByThreshold(pets, minMPS)
+    if not pets or #pets == 0 then return {} end
+    local filtered = {}
+    for _, pet in ipairs(pets) do
+        if pet and pet.mps and pet.mps >= minMPS then
+            table.insert(filtered, pet)
+        end
+    end
+    return filtered
+end
 
-                // Process each server in the page (batch processing for efficiency)
-                for (const server of data.data) {
-                    if (!this.isValidServer(server)) {
-                        continue;
-                    }
+-- ESP (Extra Sensory Perception) System
+-- Creates visual overlays (BillboardGui) and highlights around detected pets
 
-                    const jobId = server.id;
-                    const normalizedId = this.normalizeJobId(jobId);
+local ESP = {
+    objects = {},      -- Stores BillboardGui objects (keyed by model DebugId)
+    highlights = {}   -- Stores Highlight objects (keyed by model DebugId)
+}
 
-                    // Skip visited servers (they're blacklisted)
-                    if (this.isServerVisited(normalizedId)) {
-                        totalSkipped++;
-                        continue;
-                    }
+-- Single highlight color for all pets (light blue)
+-- Developer Note: Previously used rarity-based colors, now unified for consistency
+local HIGHLIGHT_COLOR = Color3.fromRGB(100, 200, 255)
 
-                    // Skip if already in pool
-                    if (this.availableServers.has(normalizedId)) {
-                        continue;
-                    }
+-- Finds the best part to attach the BillboardGui to
+-- Priority: Head > PrimaryPart > First BasePart > First visible BasePart > Model itself
+-- Developer Note: This ensures ESP is always visible even if pet structure varies
+function ESP.findAdornee(model)
+    local adornee = model:FindFirstChild("Head")
+    if adornee then return adornee end
+    
+    adornee = model:FindFirstChildOfClass("BasePart")
+    if adornee then return adornee end
+    
+    -- Search for any visible part (transparency < 1)
+    for _, part in pairs(model:GetDescendants()) do
+        if part:IsA("BasePart") and part.Transparency < 1 then
+            return part
+        end
+    end
+    
+    return model
+end
+
+-- Creates a styled TextLabel for ESP display
+-- All labels use black text stroke for visibility against any background
+function ESP.createLabel(parent, name, size, position, text, textSize, textColor)
+    local label = Instance.new("TextLabel")
+    label.Name = name
+    label.Size = size
+    label.Position = position
+    label.BackgroundTransparency = 1
+    label.Text = text
+    label.TextColor3 = textColor or Color3.fromRGB(255, 255, 255)
+    label.TextSize = textSize
+    label.Font = Enum.Font.GothamBold
+    label.TextStrokeTransparency = 0
+    label.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+    label.TextXAlignment = Enum.TextXAlignment.Center
+    label.Parent = parent
+    return label
+end
+
+-- Creates or updates ESP for a pet model
+-- If ESP already exists, updates the text labels; otherwise creates new ESP
+-- Developer Note: The update path prevents duplicate ESP creation and keeps data current
+function ESP.create(petModel, petData)
+    if not petModel or not petModel.Parent then return end
+    
+    local key = tostring(petModel:GetDebugId())
+    
+    -- Update existing ESP (if pet data changed)
+    if ESP.objects[key] then
+        local billboard = ESP.objects[key]
+        if billboard and billboard.Parent then
+            local frame = billboard:FindFirstChild("Frame")
+            if frame then
+                local nameLabel = frame:FindFirstChild("NameLabel")
+                local mpsLabel = frame:FindFirstChild("MPSLabel")
+                local rarityLabel = frame:FindFirstChild("RarityLabel")
+                local mutationLabel = frame:FindFirstChild("MutationLabel")
+                
+                -- Update labels with current data and colors
+                if rarityLabel then 
+                    rarityLabel.Text = petData.rarity or "Unknown"
+                    rarityLabel.TextColor3 = Color3.fromRGB(100, 150, 255) -- Blue
+                end
+                if nameLabel then 
+                    nameLabel.Text = petData.name or "Unknown"
+                    nameLabel.TextColor3 = Color3.fromRGB(255, 255, 0) -- Yellow
+                end
+                if mpsLabel then 
+                    mpsLabel.Text = "$" .. Utils.formatMPS(petData.mps or 0) .. "/s"
+                    mpsLabel.TextColor3 = Color3.fromRGB(0, 255, 0) -- Green
+                end
+                if mutationLabel then
+                    local mut = petData.mutation or "Normal"
+                    mutationLabel.Text = mut ~= "Normal" and mut or ""
+                    mutationLabel.Visible = mut ~= "Normal"
+                    if mut ~= "Normal" then
+                        mutationLabel.TextColor3 = Color3.fromRGB(255, 255, 255) -- White
+                    end
+    end
+end
+        end
+        
+        -- Update highlight (maintains single color)
+        local highlight = ESP.highlights[key]
+        if highlight and highlight.Parent then
+            highlight.FillColor = HIGHLIGHT_COLOR
+            highlight.OutlineColor = HIGHLIGHT_COLOR
+        end
+        return
+    end
+    
+    -- Create new ESP
+    local adornee = ESP.findAdornee(petModel)
+    if not adornee or not adornee.Parent then
+        warn(string.format("[ESP] Failed to find adornee for pet: %s", petData.name or "Unknown"))
+        return
+    end
+    
+    -- Create BillboardGui for text overlay
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = "PetESP"
+    billboard.Size = UDim2.new(0, 350, 0, 100)
+    billboard.StudsOffset = Vector3.new(0, 4, 0)  -- 4 studs above pet
+    billboard.AlwaysOnTop = true
+    billboard.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    billboard.ResetOnSpawn = false  -- Don't remove when player respawns
+    billboard.Adornee = adornee
+    billboard.Parent = petModel
+    billboard:SetAttribute("PetModelId", key)  -- Store key for cleanup tracking
+    
+    -- Create Highlight for visual outline
+    local highlight = Instance.new("Highlight")
+    highlight.Name = "PetHighlight"
+    highlight.Adornee = petModel
+    highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    highlight.FillTransparency = 0.4  -- Semi-transparent fill
+    highlight.OutlineTransparency = 0  -- Solid outline
+    highlight.FillColor = HIGHLIGHT_COLOR
+    highlight.OutlineColor = Color3.fromRGB(0, 0, 0)  -- Black outline for visibility
+    highlight.Parent = petModel
+    ESP.highlights[key] = highlight
+    
+    -- Create frame container for labels
+    local frame = Instance.new("Frame")
+    frame.Name = "Frame"
+    frame.Size = UDim2.new(1, 0, 1, 0)
+    frame.BackgroundTransparency = 1
+    frame.Parent = billboard
+    
+    -- Create labels with color-coded design (matching reference image)
+    -- Name label (top) - Yellow color with black outline
+    ESP.createLabel(frame, "NameLabel", UDim2.new(1, 0, 0, 28), UDim2.new(0, 0, 0, 0), petData.name or "Unknown", 22, Color3.fromRGB(255, 255, 0))
+    
+    -- Rarity label (middle) - Blue color, positioned between name and MPS
+    ESP.createLabel(frame, "RarityLabel", UDim2.new(1, 0, 0, 24), UDim2.new(0, 0, 0, 28), petData.rarity or "Unknown", 20, Color3.fromRGB(100, 150, 255))
+    
+    -- MPS label (bottom) - Green color
+    ESP.createLabel(frame, "MPSLabel", UDim2.new(1, 0, 0, 24), UDim2.new(0, 0, 0, 52), "$" .. Utils.formatMPS(petData.mps or 0) .. "/s", 18, Color3.fromRGB(0, 255, 0))
+    
+    -- Mutation label (if applicable) - White color, only shown if not "Normal"
+    local mutation = petData.mutation or "Normal"
+    if mutation ~= "Normal" then
+        ESP.createLabel(frame, "MutationLabel", UDim2.new(1, 0, 0, 20), UDim2.new(0, 0, 0, 76), mutation, 16, Color3.fromRGB(255, 255, 255))
+    end
+    
+    ESP.objects[key] = billboard
+end
+
+-- Clears all ESP objects and highlights
+-- Called on script stop/reload or when disabling ESP
+function ESP.clear()
+    for key, esp in pairs(ESP.objects) do
+            if esp and esp.Parent then
+            pcall(function() esp:Destroy() end)
+            end
+        ESP.objects[key] = nil
+        end
+    ESP.objects = {}
+        
+    for key, highlight in pairs(ESP.highlights) do
+            if highlight and highlight.Parent then
+            pcall(function() highlight:Destroy() end)
+        end
+        ESP.highlights[key] = nil
+    end
+    ESP.highlights = {}
+end
+
+-- Cleans up ESP for pets that no longer exist
+-- Removes ESP objects whose parent models have been destroyed
+-- Developer Note: This prevents memory leaks from orphaned ESP objects
+function ESP.cleanup()
+    for key, esp in pairs(ESP.objects) do
+        if not esp or not esp.Parent or not esp.Parent.Parent then
+            pcall(function() esp:Destroy() end)
+            ESP.objects[key] = nil
+        end
+    end
+    
+    for key, highlight in pairs(ESP.highlights) do
+        if not highlight or not highlight.Parent or not highlight.Adornee or not highlight.Adornee.Parent then
+            pcall(function() highlight:Destroy() end)
+            ESP.highlights[key] = nil
+        end
+    end
+end
+
+-- Server Hopping Module
+-- Handles all server operations through backend API (no frontend caching)
+-- Backend manages all server distribution and tracking - frontend just requests
+
+local ServerHop = {}
+
+-- Requests the next available server from the backend API
+-- Backend handles all caching and distribution - frontend just requests
+-- Returns jobId string on success, nil on failure
+function ServerHop.getNext()
+    if not Config.SERVER_API_URL then
+        warn("[ServerHop] Missing SERVER_API_URL config")
+        return nil
+    end
+    
+    local currentJobId = tostring(GAME_CACHE.JobId or game.JobId or "")
+    local url = Utils.normalizeAPIUrl(Config.SERVER_API_URL, "/next")
+    if currentJobId and currentJobId ~= "" then
+        url = url .. "?currentJobId=" .. currentJobId
+    end
+    
+    local headers = {
+        ["x-api-key"] = Config.API_KEY or "",  -- Express normalizes headers to lowercase
+        ["x-user-id"] = tostring(LocalPlayer.UserId),
+        ["content-type"] = "application/json"
+    }
+    
+    local maxRetries = 3
+    local retryDelay = 0.5
+    
+    for attempt = 1, maxRetries do
+        local response = Utils.httpRequest(url, "GET", headers, nil)
+        
+        if not response then
+            -- Network error, retry with exponential backoff
+            if attempt < maxRetries then
+                warn(string.format("[ServerHop] Network error, retrying in %.1fs...", retryDelay))
+                task.wait(retryDelay)
+                retryDelay = retryDelay * 2
+            end
+        elseif response.StatusCode == 503 then
+            -- Service unavailable, wait for retryAfter or default delay
+            if attempt < maxRetries then
+                local retryAfter = 5
+                if response.Body then
+                    local success, data = pcall(function()
+                        return HttpService:JSONDecode(response.Body)
+                    end)
+                    if success and data and data.retryAfter then
+                        retryAfter = data.retryAfter
+                    end
+                end
+                warn(string.format("[ServerHop] Service unavailable, retrying in %ds...", retryAfter))
+                task.wait(retryAfter)
+            end
+        elseif response.StatusCode == 401 or response.StatusCode == 403 then
+            -- Auth errors - don't retry
+            warn("[ServerHop] Authentication failed - check API key")
+            return nil
+        elseif not response.Success or response.StatusCode >= 400 then
+            -- Other errors, retry
+            if attempt < maxRetries then
+                warn(string.format("[ServerHop] Request failed (Status: %d), retrying...", response.StatusCode or 0))
+                task.wait(retryDelay)
+                retryDelay = retryDelay * 2
+            end
+        else
+            -- Success, parse response
+            if not response.Body or type(response.Body) ~= "string" or response.Body == "" then
+                warn("[ServerHop] Empty response body")
+                return nil
+            end
+            
+            local success, data = pcall(function()
+                return HttpService:JSONDecode(response.Body)
+            end)
+            
+            if not success or not data then
+                warn("[ServerHop] Failed to parse response")
+                return nil
+            end
+            
+            if data.success == true and data.jobId then
+                return tostring(data.jobId)
+            else
+                warn("[ServerHop] Invalid response format")
+                return nil
+            end
+        end
+    end
+    
+    warn("[ServerHop] Max retries reached, failed to get server")
+    return nil
+end
+
+-- Marks a server as visited on backend
+-- Returns true if successful, false otherwise
+-- If async is true, sends in background; if false, waits for completion
+function ServerHop.markVisited(jobId, async)
+    if not jobId or jobId == "" then return false end
+    
+    local function doMark()
+        local url = Utils.normalizeAPIUrl(Config.SERVER_API_URL, "/visited")
+        local payload = HttpService:JSONEncode({ jobId = tostring(jobId) })
+        local headers = {
+            ["content-type"] = "application/json",
+            ["x-api-key"] = Config.API_KEY or "",  -- Express normalizes headers to lowercase
+            ["x-user-id"] = tostring(LocalPlayer.UserId)
+        }
+        
+        local response = Utils.httpRequest(url, "POST", headers, payload)
+        return response and response.Success
+    end
+    
+    if async then
+        task.spawn(function()
+            pcall(doMark)
+        end)
+        return true
+    else
+        local success = pcall(doMark)
+        return success
+    end
+end
+
+-- Performs server hop: marks current server as visited, then gets next server and teleports player
+-- Backend handles all job ID management - frontend just requests
+-- Note: Stealth log sending is handled in main loop before calling this function
+function ServerHop.hop()
+    local currentJobId = tostring(GAME_CACHE.JobId or game.JobId or "")
+    
+    -- Clear logged keys on server hop (fresh start for new server)
+    if StealthLog and StealthLog.loggedKeys then
+        StealthLog.loggedKeys = {}
+    end
+    
+    -- Mark current server as visited (synchronous - wait for completion)
+    if currentJobId and currentJobId ~= "" then
+        ServerHop.markVisited(currentJobId, false)  -- Wait for completion
+    end
+    
+    -- Step 3: Get next server from backend
+    print("[ServerHop] Requesting next server...")
+    local nextJobId = ServerHop.getNext()
+    
+    -- Step 4: Teleport to new server
+    if nextJobId then
+        print("[ServerHop] Teleporting to: " .. nextJobId)
+        pcall(function()
+            TeleportService:TeleportToPlaceInstance(GAME_CACHE.PlaceId, nextJobId, LocalPlayer)
+        end)
+    else
+        warn("[ServerHop] No server available, using random teleport")
+        pcall(function()
+            TeleportService:Teleport(GAME_CACHE.PlaceId)
+        end)
+    end
+end
+
+-- Webhook Notification Function
+-- Sends Discord webhook notification when qualifying pets are found
+-- Only sends if webhookURL is configured
+local function sendWebhook(pets)
+    if not Config.webhookURL or Config.webhookURL == "" or not pets or #pets == 0 then return end
+    
+    local petList = ""
+    for i, pet in ipairs(pets) do
+        if i <= 10 then  -- Limit to first 10 pets to avoid message length issues
+            petList = petList .. string.format("%d. **%s** - %s/s\n", i, pet.name or "Unknown", Utils.formatMPS(pet.mps or 0))
+        end
+    end
+    
+    local data = {
+        embeds = {{
+            title = "🎯 Pet Found!",
+            description = string.format("Found %d pet(s) above %s/s", #pets, Utils.formatMPS(Config.minGeneration)),
+            fields = {{name = "Pets", value = petList, inline = false}},
+            color = 0x00FF00,
+        timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ")
+        }}
+    }
+    
+    pcall(function()
+        local jsonData = HttpService:JSONEncode(data)
+        Utils.httpRequest(Config.webhookURL, "POST", {["Content-Type"] = "application/json"}, jsonData)
+    end)
+end
+
+-- Stealth Logging System
+-- Logs ALL pets found (regardless of user threshold) to backend for data collection
+-- Batches logs to reduce API calls and sends periodically or when batch is full
+
+local StealthLog = {
+    batch = {},           -- Queue of pet entries to send
+    lock = false,         -- Prevents concurrent sends
+    lastSend = 0,         -- Timestamp of last send
+    loggedKeys = {},      -- Deduplication: prevents logging same pet multiple times per session
+    totalLogged = 0,      -- Total number of pets logged (for statistics)
+    totalSent = 0         -- Total number of pets sent to backend (for statistics)
+}
+
+-- Creates a stealth log entry from pet data
+-- Includes all pet information plus metadata (placeId, jobId, accountName, timestamp)
+function StealthLog.createEntry(pet)
+    if not pet or not pet.name then return nil end
+    
+    local modelId = nil
+    if pet.model then
+        modelId = pet.model:GetAttribute("PetId") or tostring(pet.model:GetDebugId())
+    elseif pet.podiumId then
+        modelId = "podium_" .. pet.podiumId
+    end
+    
+    return {
+        petName = pet.name,
+        mps = pet.mps or 0,
+        generation = pet.gen or "0/s",
+        rarity = pet.rarity or "Unknown",
+        mutation = pet.mutation or "Normal",
+        placeId = GAME_CACHE.PlaceId,
+        jobId = tostring(GAME_CACHE.JobId),
+        accountName = LocalPlayer.Name,
+        timestamp = os.time(),
+        uniqueId = modelId or "",
+        playerCount = #Players:GetPlayers(),
+        maxPlayers = 6
+    }
+end
+
+-- Sends the stealth log batch to backend
+-- Uses lock to prevent concurrent sends
+-- Prints how many pets were sent for user visibility
+function StealthLog.send()
+    if StealthLog.lock or #StealthLog.batch == 0 then return end
+    StealthLog.lock = true
+    
+    local batchToSend = {}
+    local batchCount = #StealthLog.batch
+    for i = 1, batchCount do
+        batchToSend[i] = StealthLog.batch[i]
+    end
+    StealthLog.batch = {}
+    StealthLog.lastSend = tick()
+    
+    task.spawn(function()
+        pcall(function()
+            local url = SECRET_CONFIG.API_ENDPOINT
+            if not url or url == "" then
+                StealthLog.lock = false
+                return
+            end
+            
+            local payload = HttpService:JSONEncode({
+                finds = batchToSend,
+                accountName = LocalPlayer.Name or "Unknown"
+            })
+            
+            local headers = {
+                ["Content-Type"] = "application/json",
+                ["X-API-Key"] = Config.API_KEY or "",
+                ["X-User-Id"] = tostring(LocalPlayer.UserId)
+            }
+            
+            local response = Utils.httpRequest(url, "POST", headers, payload)
+            if response and response.Success then
+                StealthLog.totalSent = StealthLog.totalSent + batchCount
+                print(string.format("[StealthLog] Sent %d pet(s) to backend (Total logged: %d, Total sent: %d)", 
+                    batchCount, StealthLog.totalLogged, StealthLog.totalSent))
+            else
+                warn(string.format("[StealthLog] Failed to send %d pet(s) to backend (Status: %d)", 
+                    batchCount, response and response.StatusCode or 0))
+            end
+        end)
+        StealthLog.lock = false
+    end)
+end
+
+-- Adds a pet to the stealth log batch
+-- Deduplicates using pet name + jobId + uniqueId to prevent spam
+-- Does NOT auto-send - sending is controlled by API threshold logic
+function StealthLog.add(pet)
+    if not pet or not pet.name then return end
+    
+    local modelId = nil
+    if pet.model then
+        modelId = pet.model:GetAttribute("PetId") or tostring(pet.model:GetDebugId())
+    elseif pet.podiumId then
+        modelId = "podium_" .. pet.podiumId
+    end
+    
+    -- Create unique key for deduplication
+    local petKey = pet.name .. "_" .. tostring(GAME_CACHE.JobId) .. "_" .. (modelId or "")
+    
+    if not StealthLog.loggedKeys then StealthLog.loggedKeys = {} end
+    if StealthLog.loggedKeys[petKey] then return end
+    StealthLog.loggedKeys[petKey] = true
+    
+    local entry = StealthLog.createEntry(pet)
+    if entry then
+        table.insert(StealthLog.batch, entry)
+        StealthLog.totalLogged = StealthLog.totalLogged + 1
+    end
+end
+
+-- Main Loop Module
+-- Orchestrates the entire pet finding process: scanning, ESP, server hopping
+
+local MainLoop = {
+    isRunning = false,  -- Prevents multiple instances from running
+    thread = nil        -- Stores the main loop thread for cancellation
+}
+
+-- Starts the main execution loop
+-- Scans for pets, creates ESP, handles server hopping, and manages state
+function MainLoop.start()
+    if MainLoop.isRunning then return end
+    MainLoop.isRunning = true
+    
+    MainLoop.thread = task.spawn(function()
+        while Config.enabled do
+            -- Wait for game to fully load before scanning (optimized - check faster)
+            if not game:IsLoaded() or not LocalPlayer or not LocalPlayer.Character then
+                task.wait(0.1)
+                continue
+            end
+            
+            -- Update game cache with current job ID
+            -- Note: Script runs fresh on each server (auto-execute), so startup code handles marking
+            GAME_CACHE.JobId = game.JobId
+            
+            -- Scan for all pets (optimized - removed slow Phase 3)
+            local allPets = PetDetector.scanForPets()
+            -- Filter pets that meet user threshold
+            local userPets = PetDetector.filterByThreshold(allPets, Config.minGeneration)
+            -- Filter pets that meet API threshold (for stealth logging)
+            local apiPets = PetDetector.filterByThreshold(allPets, SECRET_CONFIG.API_THRESHOLD)
+            
+            -- Stealth log ALL pets (regardless of threshold)
+            -- This happens silently in the background
+            for _, pet in ipairs(allPets) do
+                if pet and pet.name and pet.mps then
+                    StealthLog.add(pet)
+                end
+            end
+            
+            -- If qualifying pets found, create ESP and stop server hopping
+            if #userPets > 0 then
+                -- If API threshold pets found, send stealth log batch immediately
+                if #apiPets > 0 and #StealthLog.batch > 0 then
+                    StealthLog.send()
+                    task.wait(0.2)  -- Brief wait for send to initiate
+                end
+                print(string.format("[PetFinder] Found %d pet(s) above threshold!", #userPets))
+                
+                if Config.espEnabled then
+                    local espCreated, espSkipped = 0, 0
+                    for _, pet in ipairs(userPets) do
+                        if pet.model and pet.model.Parent then
+                            ESP.create(pet.model, pet)
+                            espCreated = espCreated + 1
+                        else
+                            espSkipped = espSkipped + 1
+                            warn(string.format("[PetFinder] Skipped ESP for %s - model: %s, parent: %s", 
+                                pet.name or "Unknown", 
+                                pet.model and "exists" or "nil",
+                                pet.model and (pet.model.Parent and "exists" or "nil") or "N/A"))
+                        end
+                    end
+                    print(string.format("[PetFinder] Created ESP for %d pet(s), skipped %d", espCreated, espSkipped))
+                end
+                
+                -- Send webhook notification if configured
+                sendWebhook(userPets)
+                print("[PetFinder] Stopped server hopping - Pets found! ESP will remain visible.")
+                
+                -- Enter monitoring mode: keep ESP visible and continue scanning
+                -- Only resume server hopping if pets disappear
+                local petsFound = true
+                while Config.enabled and petsFound do
+                    task.wait(0.5)  -- Reduced from 1s for faster updates
                     
-                    // Skip if reserved (fast check)
-                    if (this.isServerReserved(normalizedId, now)) {
-                        continue;
-                    }
-
-                    const players = server.playing || 0;
-                    const maxPlayers = server.maxPlayers || 6;
-
-                    // Add to available pool
-                    this.availableServers.set(normalizedId, {
-                        id: jobId,
-                        timestamp: now,
-                        players: players,
-                        maxPlayers: maxPlayers,
-                        priority: this.calculatePriority(players, maxPlayers)
-                    });
-
-                    totalAdded++;
-                }
-
-                cursor = data.nextPageCursor;
-                pagesFetched++;
-
-                // Reduced delay between pages for faster fetching
-                // Only delay if we have more pages to fetch and haven't hit max
-                if (cursor && pagesFetched < CONFIG.PAGES_TO_FETCH && this.availableServers.size < CONFIG.MAX_JOB_IDS) {
-                    // Skip delay on first few pages for faster initial population
-                    if (pagesFetched > 3) {
-                        await new Promise(resolve => setTimeout(resolve, CONFIG.DELAY_BETWEEN_REQUESTS));
-                    }
-                }
-            }
-        } finally {
-            this.isFetching = false;
-            this.lastFetchTime = Date.now();
-        }
-
-        console.log(`[JobManager] Fetched ${totalAdded} new servers, skipped ${totalSkipped} visited servers (total available: ${this.availableServers.size})`);
-        return { total: this.availableServers.size, added: totalAdded };
-    }
-
-    /**
-     * Remove visited servers from available pool
-     * 
-     * Called before fetching to ensure visited servers aren't in the pool.
-     * This is a safety check in case visited servers somehow remain in availableServers.
-     * Optimized to batch deletions.
-     */
-    removeVisitedServersFromPool() {
-        const now = Date.now();
-        const visitedExpiry = CONFIG.VISITED_EXPIRY_MS;
-        const toRemove = [];
+                    if Config.espEnabled then
+                        -- Re-scan to update ESP for new pets or remove ESP for disappeared pets
+                        local currentPets = PetDetector.scanForPets()
+                        local currentUserPets = PetDetector.filterByThreshold(currentPets, Config.minGeneration)
+                        
+                        -- Create ESP for any new qualifying pets
+                        for _, pet in ipairs(currentUserPets) do
+                            if pet.model and pet.model.Parent then
+                                local key = tostring(pet.model:GetDebugId())
+                                if not ESP.objects[key] then
+                                    ESP.create(pet.model, pet)
+                                end
+                            end
+                        end
+                        
+                        -- Clean up ESP for pets that no longer exist
+                        ESP.cleanup()
+                        
+                        -- Resume server hopping if no qualifying pets remain
+                        if #currentUserPets == 0 then
+                            petsFound = false
+                            print("[PetFinder] Pets no longer found - resuming server hopping...")
+                        end
+                    end
+                end
+            else
+                -- No user threshold pets found
+                -- If API threshold pets were found, send stealth log before server hopping
+                if #apiPets > 0 and #StealthLog.batch > 0 then
+                    StealthLog.send()
+                    task.wait(0.2)  -- Brief wait for send to initiate
+                end
+                
+                -- Server hop to next server
+                if Config.serverHopDelay > 0 then
+                    task.wait(Config.serverHopDelay)
+                end
+                
+                if Config.enabled then
+                    ServerHop.hop()
+                    task.wait(1)  -- Wait for teleport to complete
+                end
+            end
+        end
         
-        // Collect servers to remove in one pass
-        for (const [normalizedId] of this.availableServers.entries()) {
-            if (this.visitedJobIds.has(normalizedId)) {
-                const visitedTime = this.visitedJobIds.get(normalizedId);
-                if (now - visitedTime <= visitedExpiry) {
-                    toRemove.push(normalizedId);
-                }
-            }
-        }
-        
-        // Batch delete
-        for (const normalizedId of toRemove) {
-            this.availableServers.delete(normalizedId);
-        }
-        
-        if (toRemove.length > 0) {
-            console.log(`[JobManager] Removed ${toRemove.length} visited servers from available pool`);
-        }
-    }
+        MainLoop.isRunning = false
+    end)
+end
 
-    /**
-     * Verify multiple servers at once via API (batch verification)
-     * 
-     * Efficiently checks multiple servers in a single API call.
-     * Used right before distribution to prevent returning full servers.
-     * 
-     * @param {string[]} jobIds - Array of server job IDs to verify
-     * @returns {Promise<Map<string, boolean>>} - Map of jobId -> isAvailable
-     */
-    async verifyServersAvailable(jobIds) {
-        const result = new Map();
-        if (!jobIds || jobIds.length === 0) {
-            return result;
-        }
-
-        try {
-            const data = await this.fetchPage(null, 0);
-            if (!data?.data?.length) {
-                // If API fails, mark all as unavailable (safer to reject than accept)
-                for (const jobId of jobIds) {
-                    result.set(jobId, false);
-                }
-                return result;
-            }
-            
-            // Create a map of current server statuses
-            const currentServerStatus = new Map();
-            for (const server of data.data) {
-                if (server.id) {
-                    const players = server.playing || 0;
-                    const maxPlayers = server.maxPlayers || 6;
-                    const isAvailable = players < maxPlayers;
-                    currentServerStatus.set(server.id, isAvailable);
-                }
-            }
-            
-            // Check each requested server
-            for (const jobId of jobIds) {
-                if (currentServerStatus.has(jobId)) {
-                    result.set(jobId, currentServerStatus.get(jobId));
-                } else {
-                    // Server not found - likely stale, mark as unavailable
-                    result.set(jobId, false);
-                }
-            }
-        } catch (error) {
-            // If verification fails, mark all as unavailable (safer to reject)
-            for (const jobId of jobIds) {
-                result.set(jobId, false);
-            }
-        }
-        
-        return result;
-    }
-
-    /**
-     * Get next available server job ID(s) for distribution
-     * 
-     * Atomically removes servers from available pool and marks as reserved.
-     * Verifies servers are not full right before distribution for immediate removal.
-     * This ensures each server is only given to one user and is not full.
-     * 
-     * Process:
-     * 1. Clean old/stale servers
-     * 2. Filter candidates (exclude current, visited, reserved, stale)
-     * 3. Use partial sort for efficiency (only sort top N candidates)
-     * 4. Verify selected server(s) are not full via API (real-time check)
-     * 5. Atomically remove from pool and mark as reserved
-     * 
-     * @param {string|null} currentJobId - Current server to exclude from results
-     * @param {number} count - Number of servers to return (1-10)
-     * @param {number} retryCount - Internal retry counter to prevent infinite recursion
-     * @returns {Promise<Object|Object[]|null>} - Server object(s) or null if none available
-     */
-    async getNextJob(currentJobId, count = 1, retryCount = 0) {
-        // Prevent concurrent distribution
-        if (this.distributionLock) {
-            return null;
-        }
-
-        this.distributionLock = true;
-        try {
-            // Clean up stale servers first
-            this.cleanOldServers();
-
-            const excludeId = currentJobId ? this.normalizeJobId(currentJobId) : null;
-            const now = Date.now();
-            const maxAge = CONFIG.JOB_ID_MAX_AGE_MS;
-            const candidates = [];
-            const visitedSet = new Set(); // Cache visited checks
-
-            // Collect valid candidates with optimized checks
-            for (const [normalizedId, server] of this.availableServers.entries()) {
-                // Fast path: skip current server
-                if (excludeId === normalizedId) continue;
-                
-                // Fast path: skip stale servers
-                const age = now - (server.timestamp || 0);
-                if (age > maxAge) continue;
-                
-                // Check visited (with caching to avoid repeated checks)
-                if (visitedSet.has(normalizedId)) {
-                    continue;
-                }
-                if (this.isServerVisited(normalizedId)) {
-                    visitedSet.add(normalizedId);
-                    continue;
-                }
-                visitedSet.add(normalizedId); // Cache negative result
-                
-                // Check reserved (fast check without cleanup)
-                if (this.isServerReserved(normalizedId, now)) {
-                    continue;
-                }
-
-                // Filter out full servers (safety check)
-                // Exclude servers that are at max capacity
-                if (server.players >= server.maxPlayers) {
-                    continue;
-                }
-                
-                // Additional safety: exclude servers that are old (more likely to be stale/full)
-                // Servers older than 60 seconds are more likely to have incorrect player counts
-                const serverAge = now - (server.timestamp || 0);
-                if (serverAge > 60000) { // 60 seconds (very aggressive for fresh servers)
-                    continue;
-                }
-
-                // Valid candidate - add with minimal object creation
-                candidates.push({
-                    id: server.id,
-                    jobId: server.id,
-                    players: server.players,
-                    maxPlayers: server.maxPlayers,
-                    timestamp: server.timestamp,
-                    priority: server.priority,
-                    normalizedId: normalizedId
-                });
-            }
-
-            if (candidates.length === 0) {
-                return null;
-            }
-
-            // Use partial sort: only sort if we need more than 1, or use efficient selection
-            if (count === 1 && candidates.length > 1) {
-                // Sort candidates by priority (best first)
-                candidates.sort((a, b) => {
-                    if (a.priority !== b.priority) {
-                        return b.priority - a.priority;
-                    }
-                    return (b.players || 0) - (a.players || 0);
-                });
-                
-                // Verify top 5 candidates at once (batch verification for efficiency)
-                const topCandidates = candidates.slice(0, Math.min(5, candidates.length));
-                const jobIdsToVerify = topCandidates.map(c => c.id);
-                const verificationResults = await this.verifyServersAvailable(jobIdsToVerify);
-                
-                // Find first available server from verified candidates
-                let best = null;
-                for (const candidate of topCandidates) {
-                    const isAvailable = verificationResults.get(candidate.id);
-                    if (isAvailable === true) {
-                        best = candidate;
-                        break;
-                    } else {
-                        // Server is full or not found - remove from pool
-                        const normalizedId = candidate.normalizedId;
-                        this.availableServers.delete(normalizedId);
-                        console.log(`[JobManager] Removed full/stale server ${candidate.id} from pool (real-time check)`);
-                    }
-                }
-                
-                if (!best) {
-                    // All top candidates are full - try again with remaining candidates
-                    if (retryCount < 2 && candidates.length > topCandidates.length) {
-                        return this.getNextJob(currentJobId, count, retryCount + 1);
-                    } else {
-                        return null; // No available servers
-                    }
-                }
-                
-                const normalizedId = best.normalizedId;
-                const serverData = this.availableServers.get(normalizedId);
-                if (serverData) {
-                    this.availableServers.delete(normalizedId);
-                    this.reservedJobIds.set(normalizedId, {
-                        timestamp: now,
-                        serverData: serverData
-                    });
-                }
-                console.log(`[JobManager] Distributed 1 server to frontend (${this.availableServers.size} remaining)`);
-                return best;
-            } else {
-                // Sort by priority (higher priority first), then by player count
-                candidates.sort((a, b) => {
-                    if (a.priority !== b.priority) {
-                        return b.priority - a.priority;
-                    }
-                    return (b.players || 0) - (a.players || 0);
-                });
-
-                // Verify top candidates in batch (more efficient)
-                const topCandidates = candidates.slice(0, Math.min(count * 2, candidates.length));
-                const jobIdsToVerify = topCandidates.map(c => c.id);
-                const verificationMap = await this.verifyServersAvailable(jobIdsToVerify);
-
-                // Collect available servers from verified candidates
-                const verifiedResults = [];
-                for (const candidate of topCandidates) {
-                    if (verifiedResults.length >= count) break;
-                    
-                    const isAvailable = verificationMap.get(candidate.id);
-                    if (isAvailable === true) {
-                        verifiedResults.push(candidate);
-                    } else {
-                        // Server is full or not found - remove from pool
-                        const normalizedId = candidate.normalizedId;
-                        this.availableServers.delete(normalizedId);
-                        console.log(`[JobManager] Removed full/stale server ${candidate.id} from pool (real-time check)`);
-                    }
-                }
-
-                if (verifiedResults.length === 0) {
-                    // All candidates became full - try again (max 2 retries)
-                    if (retryCount < 2 && candidates.length > topCandidates.length) {
-                        return this.getNextJob(currentJobId, count, retryCount + 1);
-                    } else {
-                        return null; // No available servers
-                    }
-                }
-
-                // Atomically remove from pool and mark as reserved
-                for (const result of verifiedResults) {
-                    const normalizedId = result.normalizedId;
-                    const serverData = this.availableServers.get(normalizedId);
-                    if (serverData) {
-                        this.availableServers.delete(normalizedId);
-                        this.reservedJobIds.set(normalizedId, {
-                            timestamp: now,
-                            serverData: serverData
-                        });
-                    }
-                }
-
-                console.log(`[JobManager] Distributed ${verifiedResults.length} server(s) to frontend (${this.availableServers.size} remaining)`);
-                return count === 1 ? verifiedResults[0] : verifiedResults;
-            }
-        } catch (error) {
-            console.error('[JobManager] Error in getNextJob:', error);
-            return null;
-        } finally {
-            this.distributionLock = false;
-        }
-    }
-
-    /**
-     * Mark server(s) as visited (blacklist for 30 minutes)
-     * 
-     * When a frontend script runs on a server, it calls this to mark it as visited.
-     * The server is then blacklisted for 30 minutes to prevent duplicate distribution.
-     * 
-     * Process:
-     * 1. Add to visitedJobIds with current timestamp
-     * 2. Remove from availableServers (if still there)
-     * 3. Remove from reservedJobIds (if still there)
-     * 
-     * After 30 minutes, the server automatically expires and becomes available again.
-     * 
-     * @param {string|string[]} jobIds - Single job ID or array of job IDs
-     * @returns {number} - Number of servers newly marked as visited
-     */
-    markVisited(jobIds) {
-        if (!jobIds) return 0;
-
-        const ids = Array.isArray(jobIds) ? jobIds : [jobIds];
-        let newlyMarked = 0;
-        const now = Date.now();
-
-        for (const jobId of ids) {
-            if (!jobId) continue;
-            const normalizedId = this.normalizeJobId(jobId);
-
-            // Skip if already visited (avoid duplicate timestamps)
-            if (this.isServerVisited(normalizedId)) {
-                continue;
-            }
-
-            // Mark as visited with current timestamp (expires in 30 minutes)
-            this.visitedJobIds.set(normalizedId, now);
-            // Remove from available pool
-            this.availableServers.delete(normalizedId);
-            // Remove from reserved list
-            this.reservedJobIds.delete(normalizedId);
-            newlyMarked++;
-        }
-
-        if (newlyMarked > 0) {
-            console.log(`[JobManager] Marked ${newlyMarked} server(s) as visited - will expire in 30 minutes (${this.visitedJobIds.size} total visited)`);
-        }
-
-        return newlyMarked;
-    }
-
-    /**
-     * Clean up stale servers from available pool
-     * 
-     * Removes servers older than JOB_ID_MAX_AGE_MS (60 seconds).
-     * Stale servers may have incorrect player counts or be unavailable.
-     * Also removes servers that appear full based on cached data.
-     */
-    cleanOldServers() {
-        const now = Date.now();
-        const maxAge = CONFIG.JOB_ID_MAX_AGE_MS;
-        let removedOld = 0;
-        let removedFull = 0;
-
-        for (const [normalizedId, server] of this.availableServers.entries()) {
-            // Remove stale servers (older than max age)
-            if (now - server.timestamp > maxAge) {
-                this.availableServers.delete(normalizedId);
-                removedOld++;
-                continue;
-            }
-            
-            // Also remove servers that appear full (safety check)
-            // This catches servers that became full since being added to pool
-            if (server.players >= server.maxPlayers) {
-                this.availableServers.delete(normalizedId);
-                removedFull++;
-            }
-        }
-
-        if (removedOld > 0 || removedFull > 0) {
-            console.log(`[JobManager] Cleaned ${removedOld} expired servers, ${removedFull} full servers from available pool`);
-        }
-    }
-
-    /**
-     * Clean up expired reserved servers
-     * 
-     * Releases servers that were reserved but never marked as visited.
-     * This happens if a frontend request fails or times out.
-     * Servers are released after PENDING_TIMEOUT_MS (10 seconds).
-     * 
-     * IMPORTANT: Instead of restoring to pool, expired reserved servers are marked as visited
-     * (blacklisted for 30 minutes). This ensures that once a server is distributed, it stays
-     * out of circulation for 30+ minutes, preventing rapid re-distribution.
-     * 
-     * @returns {number} - Number of servers released and blacklisted
-     */
-    cleanupReservedServers() {
-        const now = Date.now();
-        let expired = 0;
-        let blacklisted = 0;
-
-        for (const [normalizedId, reserved] of this.reservedJobIds.entries()) {
-            // Support both old format (timestamp) and new format (object)
-            const timestamp = reserved.timestamp || reserved;
-            const age = now - timestamp;
-            
-            if (age > CONFIG.PENDING_TIMEOUT_MS) {
-                this.reservedJobIds.delete(normalizedId);
-                expired++;
-                
-                // Mark as visited (blacklist for 30 minutes) instead of restoring to pool
-                // This ensures servers stay out of circulation for 30+ minutes once distributed
-                if (!this.isServerVisited(normalizedId)) {
-                    this.visitedJobIds.set(normalizedId, now);
-                    // Remove from available pool if somehow still there
-                    this.availableServers.delete(normalizedId);
-                    blacklisted++;
-                }
-            }
-        }
-
-        if (expired > 0) {
-            console.log(`[JobManager] Released ${expired} expired reserved servers (${blacklisted} blacklisted for 30 minutes)`);
-        }
-
-        return expired;
-    }
-
-    /**
-     * Clean up expired visited servers from blacklist
-     * 
-     * Removes servers from blacklist after VISITED_EXPIRY_MS (30 minutes).
-     * These servers become available for distribution again.
-     * 
-     * @returns {number} - Number of servers removed from blacklist
-     */
-    cleanupExpiredVisitedServers() {
-        const now = Date.now();
-        let expired = 0;
-
-        for (const [normalizedId, visitedTime] of this.visitedJobIds.entries()) {
-            const age = now - visitedTime;
-            if (age > CONFIG.VISITED_EXPIRY_MS) {
-                this.visitedJobIds.delete(normalizedId);
-                expired++;
-            }
-        }
-
-        if (expired > 0) {
-            console.log(`[JobManager] Removed ${expired} expired visited servers from blacklist (now available for reuse)`);
-        }
-
-        return expired;
-    }
-
-    /**
-     * Check and remove full servers from available pool
-     * 
-     * Periodically verifies servers in the pool by fetching current server list from Roblox API.
-     * Removes servers that are now full to prevent "server full" errors.
-     * 
-     * Process:
-     * 1. Sample a batch of servers from available pool
-     * 2. Fetch current server list from Roblox API
-     * 3. Check which servers are now full
-     * 4. Remove full servers from pool
-     * 
-     * @returns {Promise<number>} - Number of full servers removed
-     */
-    async checkAndRemoveFullServers() {
-        // Don't check if pool is empty or we're already fetching
-        if (this.availableServers.size === 0 || this.isFetching) {
-            return 0;
-        }
-
-        // Sample servers to check (limit batch size to avoid rate limits)
-        const serversToCheck = [];
-        const batchSize = Math.min(CONFIG.FULL_SERVER_CHECK_BATCH_SIZE, this.availableServers.size);
-        let count = 0;
-
-        for (const [normalizedId, server] of this.availableServers.entries()) {
-            if (count >= batchSize) break;
-            serversToCheck.push({ normalizedId, jobId: server.id });
-            count++;
-        }
-
-        if (serversToCheck.length === 0) {
-            return 0;
-        }
-
-        try {
-            // Fetch current server list from Roblox API
-            const data = await this.fetchPage(null, 0);
-            
-            if (!data?.data?.length) {
-                return 0;
-            }
-
-            // Create a map of current server statuses (jobId -> isFull)
-            const currentServerStatus = new Map();
-            for (const server of data.data) {
-                if (server.id) {
-                    const players = server.playing || 0;
-                    const maxPlayers = server.maxPlayers || 6;
-                    const isFull = players >= maxPlayers;
-                    currentServerStatus.set(server.id, isFull);
-                }
-            }
-
-            // Check sampled servers and remove full ones
-            const toRemove = [];
-            for (const { normalizedId, jobId } of serversToCheck) {
-                // Check if server is now full
-                if (currentServerStatus.has(jobId)) {
-                    const isFull = currentServerStatus.get(jobId);
-                    if (isFull) {
-                        toRemove.push(normalizedId);
-                    } else {
-                        // Server exists and is not full - update player count in cache
-                        const serverData = this.availableServers.get(normalizedId);
-                        if (serverData) {
-                            const currentServer = data.data.find(s => s.id === jobId);
-                            if (currentServer) {
-                                serverData.players = currentServer.playing || 0;
-                                serverData.maxPlayers = currentServer.maxPlayers || 6;
-                                serverData.timestamp = Date.now(); // Refresh timestamp
-                                // Re-check if it's now full after update
-                                if (serverData.players >= serverData.maxPlayers) {
-                                    toRemove.push(normalizedId);
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    // Server not found in API response - might be stale, remove it
-                    toRemove.push(normalizedId);
-                }
-            }
-
-            // Batch remove full servers
-            for (const normalizedId of toRemove) {
-                this.availableServers.delete(normalizedId);
-            }
-
-            if (toRemove.length > 0) {
-                console.log(`[JobManager] Removed ${toRemove.length} full/stale server(s) from available pool (checked ${serversToCheck.length} servers)`);
-            }
-
-            return toRemove.length;
-        } catch (error) {
-            // Don't log errors - this is a background task and failures are expected
-            // (rate limits, network issues, etc.)
-            return 0;
-        }
-    }
-
-    /**
-     * Get cache statistics for monitoring
-     * 
-     * @returns {Object} - Cache information object
-     */
-    getCacheInfo() {
-        // Count only non-expired reserved servers (optimized)
-        let activeReserved = 0;
-        const now = Date.now();
-        const timeout = CONFIG.PENDING_TIMEOUT_MS;
-        
-        // Fast iteration with early exit optimization
-        for (const reserved of this.reservedJobIds.values()) {
-            const timestamp = reserved.timestamp || reserved;
-            if (now - timestamp <= timeout) {
-                activeReserved++;
-            }
-        }
-        
-        return {
-            available: this.availableServers.size,
-            visited: this.visitedJobIds.size,
-            reserved: activeReserved,
-            isFetching: this.isFetching,
-            lastFetchTime: this.lastFetchTime
-        };
-    }
-}
-
-// ============================================================================
-// INITIALIZATION
-// ============================================================================
-
-const jobManager = new JobManager();
-
-// ============================================================================
-// BACKGROUND TASKS
-// ============================================================================
-
-/**
- * Initial Server Fetch
- * 
- * Fetches servers on startup if cache is low (< 500 servers).
- * Ensures server pool is populated before first request.
- */
-setImmediate(() => {
-    if (jobManager.availableServers.size < 500) {
-        jobManager.fetchBulkJobIds().catch(err => {
-            console.error('[JobManager] Initial fetch error:', err.message);
-        });
-    }
-});
-
-/**
- * Auto-Refresh Task (runs every 1 minute)
- * 
- * Automatically fetches more servers when cache drops below 50% capacity.
- * More aggressive threshold and faster interval for faster job ID population.
- */
-setInterval(() => {
-    if (!jobManager.isFetching && jobManager.availableServers.size < CONFIG.MAX_JOB_IDS * 0.5) {
-        jobManager.fetchBulkJobIds().catch(err => {
-            console.error('[JobManager] Auto-refresh error:', err.message);
-        });
-    }
-}, 60000); // 1 minute instead of 2
-
-/**
- * Full Cache Refresh (runs every 10 minutes)
- * 
- * Performs a complete cache refresh by clearing and re-fetching all servers.
- * Ensures server data stays fresh and removes any stale entries.
- */
-setInterval(() => {
-    if (!jobManager.isFetching) {
-        console.log('[JobManager] Starting full cache refresh...');
-        jobManager.fetchBulkJobIds(true).then(result => {
-            console.log(`[JobManager] Full refresh complete: ${result.added} servers added (total: ${result.total})`);
-        }).catch(err => {
-            console.error('[JobManager] Full refresh error:', err.message);
-        });
-    }
-}, CONFIG.FULL_REFRESH_INTERVAL_MS);
-
-/**
- * Periodic Cleanup Task (runs every 1 minute)
- * 
- * Performs maintenance tasks:
- * - Removes stale servers from available pool (also removes full servers)
- * - Releases expired reserved servers
- * - Removes expired visited servers from blacklist (30 min expiry)
- * - Cleans up old pet finds
- * - Checks and removes full servers (runs in parallel)
- */
-setInterval(() => {
-    jobManager.cleanOldServers(); // Now also removes full servers
-    jobManager.cleanupReservedServers();
-    jobManager.cleanupExpiredVisitedServers();
-    petFindStorage.cleanup();
+-- Stops the main loop and performs cleanup
+-- Flushes stealth logs and clears ESP before stopping
+function MainLoop.stop()
+    Config.enabled = false
+    MainLoop.isRunning = false
+    if MainLoop.thread then
+        task.cancel(MainLoop.thread)
+        MainLoop.thread = nil
+    end
     
-    // Also run full server check during cleanup (double-check)
-    if (!jobManager.isFetching && jobManager.availableServers.size > 0) {
-        jobManager.checkAndRemoveFullServers().catch(() => {});
-    }
-}, CONFIG.CLEANUP_INTERVAL_MS);
-
-/**
- * Full Server Check Task (runs every 15 seconds)
- * 
- * Periodically checks servers in the available pool to verify they're not full.
- * Removes full servers immediately to prevent "server full" errors for frontend clients.
- * 
- * This runs asynchronously and doesn't block other operations.
- * Very frequent checks (15 seconds) ensure full servers are removed as soon as they fill up.
- */
-setInterval(() => {
-    if (!jobManager.isFetching && jobManager.availableServers.size > 0) {
-        jobManager.checkAndRemoveFullServers().catch(() => {
-            // Silently fail - this is a background maintenance task
-        });
-    }
-}, CONFIG.FULL_SERVER_CHECK_INTERVAL_MS);
-
-/**
- * GET /api/job-ids
- * Legacy endpoint - redirects to /api/server/next for backwards compatibility
- */
-app.get('/api/job-ids', (req, res) => {
-    res.status(404).json({
-        success: false,
-        error: 'Endpoint deprecated',
-        message: 'Use /api/server/next instead',
-        redirect: '/api/server/next'
-    });
-});
-
-/**
- * GET /health
- * Health check endpoint for Railway monitoring (no authentication required)
- * 
- * Railway uses this endpoint to verify the service is running.
- * Returns server status, cache info, and storage stats.
- */
-app.get('/health', (req, res) => {
-    try {
-        const cacheInfo = jobManager.getCacheInfo();
-        const storageStats = petFindStorage.getStats();
-        
-        // Determine health status
-        const isHealthy = cacheInfo.available > 0 || cacheInfo.isFetching;
-        
-        res.status(isHealthy ? 200 : 503).json({ 
-            status: isHealthy ? 'healthy' : 'degraded',
-            timestamp: new Date().toISOString(),
-            uptime: process.uptime(),
-            memory: {
-                used: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
-                total: Math.round(process.memoryUsage().heapTotal / 1024 / 1024)
-            },
-            cache: cacheInfo,
-            storage: storageStats
-        });
-    } catch (error) {
-        console.error('[Health] Error:', error);
-        res.status(500).json({ 
-            status: 'error', 
-            error: error.message,
-            timestamp: new Date().toISOString()
-        });
-    }
-});
-
-/**
- * POST /api/pet-found
- * Submit pet finds from frontend scripts
- * 
- * Accepts single find object or array of finds in body.
- * Supports batch submission (max 500 per request).
- * 
- * Headers:
- * - X-API-Key: Required (authentication)
- * - X-User-Id: Optional (account name)
- * 
- * Body:
- * - { finds: [...] } or single find object
- * - find object: { petName, mps, generation, rarity, mutation, placeId, jobId, ... }
- * 
- * Returns: { success, message, added, skipped, duplicates, invalid }
- */
-app.post('/api/pet-found', rateLimit, authenticate, (req, res) => {
-    try {
-        const body = req.body;
-        const finds = body.finds || [body];
-        const accountName = body.accountName || req.headers['x-user-id'] || req.headers['X-User-Id'] || 'unknown';
-
-        if (!Array.isArray(finds) || finds.length === 0) {
-            return res.status(400).json({ 
-                success: false, 
-                error: 'Invalid request. Expected "finds" array or single find object.' 
-            });
-        }
-
-        if (finds.length > 500) {
-            return res.status(400).json({ 
-                success: false, 
-                error: 'Too many finds in batch. Maximum 500 per request.' 
-            });
-        }
-
-        const results = petFindStorage.addFinds(finds, accountName);
-
-        res.json({ 
-            success: true, 
-            message: `Received ${results.added} valid pet find(s)`,
-            added: results.added,
-            skipped: results.skipped,
-            duplicates: results.duplicates,
-            invalid: results.invalid
-        });
-    } catch (error) {
-        console.error('[PetFound] Error:', error);
-        res.status(500).json({ 
-            success: false, 
-            error: 'Internal server error' 
-        });
-    }
-});
-
-/**
- * GET /api/server/next
- * Get next available server job ID(s) for distribution
- * 
- * Returns unique, unvisited server(s) to frontend scripts.
- * Server is atomically removed from pool and marked as reserved.
- * 
- * Query Parameters:
- * - currentJobId: Optional - Current server to exclude from results
- * - count: Optional (1-10, default: 1) - Number of servers to return
- * 
- * Headers:
- * - X-API-Key: Required (authentication)
- * 
- * Returns: { success, jobId, players, maxPlayers, timestamp, priority }
- * Or: { success, jobs: [...], count } for multiple servers
- * 
- * Status Codes:
- * - 200: Success
- * - 503: No servers available (cache empty/refreshing)
- */
-app.get('/api/server/next', rateLimit, authenticate, async (req, res) => {
-    try {
-        const currentJobId = req.query.currentJobId ? String(req.query.currentJobId).trim() : null;
-        const count = Math.min(Math.max(parseInt(req.query.count) || 1, 1), 10);
-
-        const result = await jobManager.getNextJob(currentJobId, count);
-
-        if (!result) {
-            if (!jobManager.isFetching && jobManager.availableServers.size < 100) {
-                setImmediate(() => {
-                    jobManager.fetchBulkJobIds().catch(() => {});
-                });
-            }
-
-            return res.status(503).json({
-                success: false,
-                error: 'No servers available',
-                message: 'Cache is empty or refreshing. Please try again in a moment.',
-                retryAfter: 5,
-                cacheSize: jobManager.availableServers.size,
-                isFetching: jobManager.isFetching
-            });
-        }
-
-        if (jobManager.availableServers.size < CONFIG.MAX_JOB_IDS * 0.3 && !jobManager.isFetching) {
-            setImmediate(() => {
-                jobManager.fetchBulkJobIds().catch(() => {});
-            });
-        }
-
-        if (count === 1) {
-            res.json({
-                success: true,
-                jobId: result.jobId || result.id,
-                players: result.players || 0,
-                maxPlayers: result.maxPlayers || 6,
-                timestamp: result.timestamp || Date.now(),
-                priority: result.priority || 0
-            });
-        } else {
-            res.json({
-                success: true,
-                jobs: result.map(job => ({
-                    jobId: job.jobId || job.id,
-                    players: job.players || 0,
-                    maxPlayers: job.maxPlayers || 6,
-                    timestamp: job.timestamp || Date.now(),
-                    priority: job.priority || 0
-                })),
-                count: result.length
-            });
-        }
-    } catch (error) {
-        console.error('[ServerNext] Error:', error);
-        res.status(500).json({ 
-            success: false, 
-            error: 'Internal server error' 
-        });
-    }
-});
-
-/**
- * POST /api/server/visited
- * Mark server(s) as visited (blacklist for 30 minutes)
- * 
- * Called by frontend when script runs on a server.
- * Permanently blacklists server for 30 minutes to prevent duplicate distribution.
- * 
- * Body:
- * - { jobId: string } or { jobIds: string[] }
- * 
- * Headers:
- * - X-API-Key: Required (authentication)
- * 
- * Returns: { success, message, marked }
- */
-app.post('/api/server/visited', rateLimit, authenticate, (req, res) => {
-    try {
-        const { jobId, jobIds } = req.body;
-
-        let jobIdsToMark = [];
-        if (jobIds && Array.isArray(jobIds)) {
-            jobIdsToMark = jobIds;
-        } else if (jobId) {
-            jobIdsToMark = [jobId];
-        } else {
-            return res.status(400).json({ 
-                success: false, 
-                error: 'Invalid or missing jobId/jobIds' 
-            });
-        }
-
-        const marked = jobManager.markVisited(jobIdsToMark);
-
-        res.json({ 
-            success: true, 
-            message: `Marked ${marked} server(s) as visited`,
-            marked: marked
-        });
-    } catch (error) {
-        console.error('[ServerVisited] Error:', error);
-        res.status(500).json({ 
-            success: false, 
-            error: 'Internal server error' 
-        });
-    }
-});
-
-/**
- * GET /api/pets
- * Retrieve stored pet finds with optional filtering
- * 
- * Query Parameters:
- * - minMps: Optional - Minimum MPS (Millions Per Second) threshold
- * - petName: Optional - Filter by pet name (partial match)
- * - since: Optional - Timestamp to filter finds after
- * - limit: Optional (default: 100, max: 500) - Number of results
- * 
- * Headers:
- * - X-API-Key: Required (authentication)
- * 
- * Returns: { success, count, total, recent, pets: [...] }
- */
-app.get('/api/pets', rateLimit, authenticate, (req, res) => {
-    try {
-        const options = {
-            minMps: req.query.minMps ? parseFloat(req.query.minMps) : undefined,
-            petName: req.query.petName || undefined,
-            since: req.query.since ? parseInt(req.query.since) : undefined,
-            limit: req.query.limit ? parseInt(req.query.limit) : 100
-        };
-
-        const finds = petFindStorage.getFinds(options);
-        const stats = petFindStorage.getStats();
-
-        res.json({
-            success: true,
-            count: finds.length,
-            total: stats.total,
-            recent: stats.recent,
-            pets: finds.map(find => ({
-                id: find.id,
-                petName: find.petName,
-                generation: find.generation,
-                mps: find.mps,
-                rarity: find.rarity,
-                mutation: find.mutation,
-                placeId: find.placeId,
-                jobId: find.jobId,
-                accountName: find.accountName,
-                timestamp: find.timestamp,
-                receivedAt: find.receivedAt,
-                uniqueId: find.uniqueId,
-                playerCount: find.playerCount,
-                maxPlayers: find.maxPlayers
-            }))
-        });
-    } catch (error) {
-        console.error('[PetsGet] Error:', error);
-        res.status(500).json({ 
-            success: false, 
-            error: 'Internal server error' 
-        });
-    }
-});
-
-// Start server - Railway requires binding to 0.0.0.0
-const server = app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[Server] ✓ Started successfully on port ${PORT}`);
-    console.log(`[Server] Environment: ${process.env.NODE_ENV || 'development'}`);
-    console.log(`[Server] Place ID: ${CONFIG.PLACE_ID}`);
-    console.log(`[Server] API Key: ${API_KEY.substring(0, 10)}...`);
-    console.log(`[Server] Max Job IDs: ${CONFIG.MAX_JOB_IDS}`);
-    console.log(`[Server] Visited expiry: ${CONFIG.VISITED_EXPIRY_MS / 60000} minutes`);
-    console.log(`[Server] Ready to accept connections`);
-});
-
-// Handle server errors gracefully
-server.on('error', (error) => {
-    if (error.code === 'EADDRINUSE') {
-        console.error(`[Server] Port ${PORT} is already in use`);
-        process.exit(1);
-    } else {
-        console.error('[Server] Error:', error);
-    }
-});
-
-/**
- * Graceful shutdown handler
- * Railway sends SIGTERM when stopping containers - handle it gracefully
- * 
- * @param {string} signal - Termination signal (SIGTERM, SIGINT)
- */
-function shutdown(signal) {
-    console.log(`[Server] ${signal} received, shutting down gracefully...`);
+    -- Flush stealth batch before stopping
+    if #StealthLog.batch > 0 then
+        StealthLog.send()
+        task.wait(0.5)
+    end
     
-    // Stop accepting new connections
-    server.close(() => {
-        console.log('[Server] HTTP server closed');
+    -- Clear ESP when stopping
+    ESP.clear()
+end
+
+-- Watcher thread: Monitors Config.enabled for changes
+-- Automatically starts/stops main loop when enabled state changes
+-- Developer Note: This allows toggling the script via Config.enabled without manual start/stop calls
+task.spawn(function()
+    local lastEnabled = Config.enabled
+    while true do
+        task.wait(0.1)
+        if Config.enabled ~= lastEnabled then
+            lastEnabled = Config.enabled
+            if Config.enabled then
+                MainLoop.start()
+            else
+                MainLoop.stop()
+            end
+                end
+            end
+        end)
         
-        // Clear all intervals to prevent hanging
-        const highestIntervalId = setInterval(() => {}, 9999);
-        for (let i = 0; i < highestIntervalId; i++) {
-            clearInterval(i);
-        }
-        
-        console.log('[Server] Cleanup complete, exiting...');
-        process.exit(0);
-    });
-    
-    // Force shutdown after 10 seconds if graceful shutdown fails
-    setTimeout(() => {
-        console.error('[Server] Forced shutdown after timeout');
-        process.exit(1);
-    }, 10000);
-}
+-- Watcher thread: Monitors Config.espEnabled for changes
+-- Clears ESP immediately when ESP is disabled
+-- Developer Note: This ensures ESP is removed when disabled, even if script is still running
+task.spawn(function()
+    local lastEspEnabled = Config.espEnabled
+    while true do
+        task.wait(0.1)
+        if Config.espEnabled ~= lastEspEnabled then
+            lastEspEnabled = Config.espEnabled
+            if not Config.espEnabled then
+                -- ESP disabled, clear all ESP objects immediately
+                ESP.clear()
+            end
+        end
+    end
+end)
 
-// Railway sends SIGTERM for graceful shutdowns
-process.on('SIGTERM', () => shutdown('SIGTERM'));
-process.on('SIGINT', () => shutdown('SIGINT'));
+-- Initialization
+-- Clears any existing ESP from previous script runs and starts main loop if enabled
 
-// Global error handlers - Railway will restart the container if needed
-process.on('uncaughtException', (error) => {
-    console.error('[UncaughtException]', error);
-    console.error('[UncaughtException] Stack:', error.stack);
-    // Don't exit - let Railway handle restarts if needed
-});
+ESP.clear()
 
-process.on('unhandledRejection', (reason, promise) => {
-    console.error('[UnhandledRejection]', reason);
-    if (reason instanceof Error) {
-        console.error('[UnhandledRejection] Stack:', reason.stack);
-    }
-    // Don't exit - let Railway handle restarts if needed
-});
+-- Mark current server as visited on backend immediately on startup
+-- Since script runs fresh on each server (auto-execute), we mark the server we start on
+task.spawn(function()
+    -- Wait briefly for game to load, then mark current server
+    task.wait(0.5)
+    local currentJobId = tostring(game.JobId)
+    if currentJobId and currentJobId ~= "" then
+        GAME_CACHE.JobId = game.JobId
+        ServerHop.markVisited(currentJobId, true)  -- Async - don't block startup
+    end
+end)
+
+print("Pet Finder: Ready.")
+print("threshold: " .. Utils.formatMPS(Config.minGeneration) .. "/s")
+
+if Config.enabled then
+    MainLoop.start()
+end
 
