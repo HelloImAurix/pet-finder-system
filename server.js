@@ -51,8 +51,8 @@ const CONFIG = {
     // Minimum player count required for a server to be considered valid
     MIN_PLAYERS: parseInt(process.env.MIN_PLAYERS || '0', 10),
     
-    // Maximum age of cached server data before it's considered stale (5 minutes)
-    JOB_ID_MAX_AGE_MS: parseInt(process.env.JOB_ID_MAX_AGE_MS || '300000', 10),
+    // Maximum age of cached server data before it's considered stale (3 minutes - reduced for better filtering)
+    JOB_ID_MAX_AGE_MS: parseInt(process.env.JOB_ID_MAX_AGE_MS || '180000', 10),
     
     // Maximum number of pet finds to store in memory
     MAX_FINDS: parseInt(process.env.MAX_FINDS || '10000', 10),
@@ -69,11 +69,11 @@ const CONFIG = {
     // Periodic cleanup interval (1 minute)
     CLEANUP_INTERVAL_MS: 60000,
     
-    // Full server check interval (2 minutes)
-    FULL_SERVER_CHECK_INTERVAL_MS: 120000,
+    // Full server check interval (1 minute - more frequent)
+    FULL_SERVER_CHECK_INTERVAL_MS: 60000,
     
-    // Number of servers to check per batch for full server verification
-    FULL_SERVER_CHECK_BATCH_SIZE: 50,
+    // Number of servers to check per batch for full server verification (increased)
+    FULL_SERVER_CHECK_BATCH_SIZE: 100,
     
     // Timeout for reserved servers before releasing back to pool (10 seconds)
     PENDING_TIMEOUT_MS: 10000,
@@ -800,6 +800,13 @@ class JobManager {
                 if (server.players >= server.maxPlayers) {
                     continue;
                 }
+                
+                // Additional safety: exclude servers that are old (more likely to be stale/full)
+                // Servers older than 2 minutes are more likely to have incorrect player counts
+                const serverAge = now - (server.timestamp || 0);
+                if (serverAge > 120000) { // 2 minutes (reduced from 3 for better filtering)
+                    continue;
+                }
 
                 // Valid candidate - add with minimal object creation
                 candidates.push({
@@ -928,21 +935,32 @@ class JobManager {
      * 
      * Removes servers older than JOB_ID_MAX_AGE_MS (5 minutes).
      * Stale servers may have incorrect player counts or be unavailable.
+     * Also removes servers that appear full based on cached data.
      */
     cleanOldServers() {
         const now = Date.now();
         const maxAge = CONFIG.JOB_ID_MAX_AGE_MS;
         let removedOld = 0;
+        let removedFull = 0;
 
         for (const [normalizedId, server] of this.availableServers.entries()) {
+            // Remove stale servers (older than max age)
             if (now - server.timestamp > maxAge) {
                 this.availableServers.delete(normalizedId);
                 removedOld++;
+                continue;
+            }
+            
+            // Also remove servers that appear full (safety check)
+            // This catches servers that became full since being added to pool
+            if (server.players >= server.maxPlayers) {
+                this.availableServers.delete(normalizedId);
+                removedFull++;
             }
         }
 
-        if (removedOld > 0) {
-            console.log(`[JobManager] Cleaned ${removedOld} expired servers from available pool`);
+        if (removedOld > 0 || removedFull > 0) {
+            console.log(`[JobManager] Cleaned ${removedOld} expired servers, ${removedFull} full servers from available pool`);
         }
     }
 
@@ -1080,6 +1098,21 @@ class JobManager {
                     const isFull = currentServerStatus.get(jobId);
                     if (isFull) {
                         toRemove.push(normalizedId);
+                    } else {
+                        // Server exists and is not full - update player count in cache
+                        const serverData = this.availableServers.get(normalizedId);
+                        if (serverData) {
+                            const currentServer = data.data.find(s => s.id === jobId);
+                            if (currentServer) {
+                                serverData.players = currentServer.playing || 0;
+                                serverData.maxPlayers = currentServer.maxPlayers || 6;
+                                serverData.timestamp = Date.now(); // Refresh timestamp
+                                // Re-check if it's now full after update
+                                if (serverData.players >= serverData.maxPlayers) {
+                                    toRemove.push(normalizedId);
+                                }
+                            }
+                        }
                     }
                 } else {
                     // Server not found in API response - might be stale, remove it
@@ -1192,25 +1225,32 @@ setInterval(() => {
  * Periodic Cleanup Task (runs every 1 minute)
  * 
  * Performs maintenance tasks:
- * - Removes stale servers from available pool
+ * - Removes stale servers from available pool (also removes full servers)
  * - Releases expired reserved servers
  * - Removes expired visited servers from blacklist (30 min expiry)
  * - Cleans up old pet finds
+ * - Checks and removes full servers (runs in parallel)
  */
 setInterval(() => {
-    jobManager.cleanOldServers();
+    jobManager.cleanOldServers(); // Now also removes full servers
     jobManager.cleanupReservedServers();
     jobManager.cleanupExpiredVisitedServers();
     petFindStorage.cleanup();
+    
+    // Also run full server check during cleanup (double-check)
+    if (!jobManager.isFetching && jobManager.availableServers.size > 0) {
+        jobManager.checkAndRemoveFullServers().catch(() => {});
+    }
 }, CONFIG.CLEANUP_INTERVAL_MS);
 
 /**
- * Full Server Check Task (runs every 2 minutes)
+ * Full Server Check Task (runs every 1 minute)
  * 
  * Periodically checks servers in the available pool to verify they're not full.
  * Removes full servers to prevent "server full" errors for frontend clients.
  * 
  * This runs asynchronously and doesn't block other operations.
+ * More frequent checks ensure full servers are removed quickly.
  */
 setInterval(() => {
     if (!jobManager.isFetching && jobManager.availableServers.size > 0) {
