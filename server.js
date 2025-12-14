@@ -587,6 +587,7 @@ class JobManager {
         const maxPlayers = server.maxPlayers || 6;
         
         // Filter by player count requirements
+        // Exclude empty servers (if MIN_PLAYERS > 0) and full servers only
         if (players < CONFIG.MIN_PLAYERS || players >= maxPlayers) {
             return false;
         }
@@ -785,6 +786,12 @@ class JobManager {
                 
                 // Check reserved (fast check without cleanup)
                 if (this.isServerReserved(normalizedId, now)) {
+                    continue;
+                }
+
+                // Filter out full servers (safety check)
+                // Exclude servers that are at max capacity
+                if (server.players >= server.maxPlayers) {
                     continue;
                 }
 
