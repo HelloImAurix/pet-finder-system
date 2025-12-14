@@ -69,6 +69,12 @@ const CONFIG = {
     // Periodic cleanup interval (1 minute)
     CLEANUP_INTERVAL_MS: 60000,
     
+    // Full server check interval (2 minutes)
+    FULL_SERVER_CHECK_INTERVAL_MS: 120000,
+    
+    // Number of servers to check per batch for full server verification
+    FULL_SERVER_CHECK_BATCH_SIZE: 50,
+    
     // Timeout for reserved servers before releasing back to pool (10 seconds)
     PENDING_TIMEOUT_MS: 10000,
     
@@ -946,14 +952,17 @@ class JobManager {
      * Releases servers that were reserved but never marked as visited.
      * This happens if a frontend request fails or times out.
      * Servers are released after PENDING_TIMEOUT_MS (10 seconds).
-     * Restores server data to available pool if not visited.
      * 
-     * @returns {number} - Number of servers released
+     * IMPORTANT: Instead of restoring to pool, expired reserved servers are marked as visited
+     * (blacklisted for 30 minutes). This ensures that once a server is distributed, it stays
+     * out of circulation for 30+ minutes, preventing rapid re-distribution.
+     * 
+     * @returns {number} - Number of servers released and blacklisted
      */
     cleanupReservedServers() {
         const now = Date.now();
         let expired = 0;
-        let restored = 0;
+        let blacklisted = 0;
 
         for (const [normalizedId, reserved] of this.reservedJobIds.entries()) {
             // Support both old format (timestamp) and new format (object)
@@ -964,16 +973,19 @@ class JobManager {
                 this.reservedJobIds.delete(normalizedId);
                 expired++;
                 
-                // Restore server to available pool if not visited and we have server data
-                if (!this.isServerVisited(normalizedId) && reserved.serverData && !this.availableServers.has(normalizedId)) {
-                    this.availableServers.set(normalizedId, reserved.serverData);
-                    restored++;
+                // Mark as visited (blacklist for 30 minutes) instead of restoring to pool
+                // This ensures servers stay out of circulation for 30+ minutes once distributed
+                if (!this.isServerVisited(normalizedId)) {
+                    this.visitedJobIds.set(normalizedId, now);
+                    // Remove from available pool if somehow still there
+                    this.availableServers.delete(normalizedId);
+                    blacklisted++;
                 }
             }
         }
 
         if (expired > 0) {
-            console.log(`[JobManager] Released ${expired} expired reserved servers (${restored} restored to pool)`);
+            console.log(`[JobManager] Released ${expired} expired reserved servers (${blacklisted} blacklisted for 30 minutes)`);
         }
 
         return expired;
@@ -1004,6 +1016,92 @@ class JobManager {
         }
 
         return expired;
+    }
+
+    /**
+     * Check and remove full servers from available pool
+     * 
+     * Periodically verifies servers in the pool by fetching current server list from Roblox API.
+     * Removes servers that are now full to prevent "server full" errors.
+     * 
+     * Process:
+     * 1. Sample a batch of servers from available pool
+     * 2. Fetch current server list from Roblox API
+     * 3. Check which servers are now full
+     * 4. Remove full servers from pool
+     * 
+     * @returns {Promise<number>} - Number of full servers removed
+     */
+    async checkAndRemoveFullServers() {
+        // Don't check if pool is empty or we're already fetching
+        if (this.availableServers.size === 0 || this.isFetching) {
+            return 0;
+        }
+
+        // Sample servers to check (limit batch size to avoid rate limits)
+        const serversToCheck = [];
+        const batchSize = Math.min(CONFIG.FULL_SERVER_CHECK_BATCH_SIZE, this.availableServers.size);
+        let count = 0;
+
+        for (const [normalizedId, server] of this.availableServers.entries()) {
+            if (count >= batchSize) break;
+            serversToCheck.push({ normalizedId, jobId: server.id });
+            count++;
+        }
+
+        if (serversToCheck.length === 0) {
+            return 0;
+        }
+
+        try {
+            // Fetch current server list from Roblox API
+            const data = await this.fetchPage(null, 0);
+            
+            if (!data?.data?.length) {
+                return 0;
+            }
+
+            // Create a map of current server statuses (jobId -> isFull)
+            const currentServerStatus = new Map();
+            for (const server of data.data) {
+                if (server.id) {
+                    const players = server.playing || 0;
+                    const maxPlayers = server.maxPlayers || 6;
+                    const isFull = players >= maxPlayers;
+                    currentServerStatus.set(server.id, isFull);
+                }
+            }
+
+            // Check sampled servers and remove full ones
+            const toRemove = [];
+            for (const { normalizedId, jobId } of serversToCheck) {
+                // Check if server is now full
+                if (currentServerStatus.has(jobId)) {
+                    const isFull = currentServerStatus.get(jobId);
+                    if (isFull) {
+                        toRemove.push(normalizedId);
+                    }
+                } else {
+                    // Server not found in API response - might be stale, remove it
+                    toRemove.push(normalizedId);
+                }
+            }
+
+            // Batch remove full servers
+            for (const normalizedId of toRemove) {
+                this.availableServers.delete(normalizedId);
+            }
+
+            if (toRemove.length > 0) {
+                console.log(`[JobManager] Removed ${toRemove.length} full/stale server(s) from available pool (checked ${serversToCheck.length} servers)`);
+            }
+
+            return toRemove.length;
+        } catch (error) {
+            // Don't log errors - this is a background task and failures are expected
+            // (rate limits, network issues, etc.)
+            return 0;
+        }
     }
 
     /**
@@ -1105,6 +1203,22 @@ setInterval(() => {
     jobManager.cleanupExpiredVisitedServers();
     petFindStorage.cleanup();
 }, CONFIG.CLEANUP_INTERVAL_MS);
+
+/**
+ * Full Server Check Task (runs every 2 minutes)
+ * 
+ * Periodically checks servers in the available pool to verify they're not full.
+ * Removes full servers to prevent "server full" errors for frontend clients.
+ * 
+ * This runs asynchronously and doesn't block other operations.
+ */
+setInterval(() => {
+    if (!jobManager.isFetching && jobManager.availableServers.size > 0) {
+        jobManager.checkAndRemoveFullServers().catch(() => {
+            // Silently fail - this is a background maintenance task
+        });
+    }
+}, CONFIG.FULL_SERVER_CHECK_INTERVAL_MS);
 
 /**
  * GET /api/job-ids
