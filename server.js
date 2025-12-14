@@ -42,17 +42,17 @@ const CONFIG = {
     // Maximum number of server job IDs to cache in memory
     MAX_JOB_IDS: parseInt(process.env.MAX_JOB_IDS || '3000', 10),
     
-    // Number of API pages to fetch when refreshing server list
-    PAGES_TO_FETCH: parseInt(process.env.PAGES_TO_FETCH || '100', 10),
+    // Number of API pages to fetch when refreshing server list (increased for faster population)
+    PAGES_TO_FETCH: parseInt(process.env.PAGES_TO_FETCH || '200', 10),
     
-    // Delay between API requests to avoid rate limiting (milliseconds)
-    DELAY_BETWEEN_REQUESTS: parseInt(process.env.DELAY_BETWEEN_REQUESTS || '100', 10),
+    // Delay between API requests to avoid rate limiting (milliseconds) - reduced for faster fetching
+    DELAY_BETWEEN_REQUESTS: parseInt(process.env.DELAY_BETWEEN_REQUESTS || '50', 10),
     
     // Minimum player count required for a server to be considered valid
     MIN_PLAYERS: parseInt(process.env.MIN_PLAYERS || '0', 10),
     
-    // Maximum age of cached server data before it's considered stale (3 minutes - reduced for better filtering)
-    JOB_ID_MAX_AGE_MS: parseInt(process.env.JOB_ID_MAX_AGE_MS || '180000', 10),
+    // Maximum age of cached server data before it's considered stale (60 seconds - very aggressive for fresh servers)
+    JOB_ID_MAX_AGE_MS: parseInt(process.env.JOB_ID_MAX_AGE_MS || '60000', 10),
     
     // Maximum number of pet finds to store in memory
     MAX_FINDS: parseInt(process.env.MAX_FINDS || '10000', 10),
@@ -69,8 +69,8 @@ const CONFIG = {
     // Periodic cleanup interval (1 minute)
     CLEANUP_INTERVAL_MS: 60000,
     
-    // Full server check interval (30 seconds - very frequent for immediate removal)
-    FULL_SERVER_CHECK_INTERVAL_MS: 30000,
+    // Full server check interval (15 seconds - very frequent for immediate removal)
+    FULL_SERVER_CHECK_INTERVAL_MS: 15000,
     
     // Number of servers to check per batch for full server verification (increased for better coverage)
     FULL_SERVER_CHECK_BATCH_SIZE: 200,
@@ -528,6 +528,7 @@ class JobManager {
      * @returns {Promise<Object|null>} - API response or null on failure
      */
     async fetchPage(cursor = null, retryCount = 0) {
+        // Increased limit to 100 (max allowed by Roblox API) for more servers per page
         let url = `https://games.roblox.com/v1/games/${CONFIG.PLACE_ID}/servers/Public?sortOrder=Desc&limit=100&excludeFullGames=true`;
         if (cursor) {
             url += `&cursor=${encodeURIComponent(cursor)}`;
@@ -649,7 +650,7 @@ class JobManager {
 
                 const now = Date.now();
 
-                // Process each server in the page
+                // Process each server in the page (batch processing for efficiency)
                 for (const server of data.data) {
                     if (!this.isValidServer(server)) {
                         continue;
@@ -692,9 +693,13 @@ class JobManager {
                 cursor = data.nextPageCursor;
                 pagesFetched++;
 
-                // Rate limiting delay between pages
-                if (cursor && pagesFetched < CONFIG.PAGES_TO_FETCH) {
-                    await new Promise(resolve => setTimeout(resolve, CONFIG.DELAY_BETWEEN_REQUESTS));
+                // Reduced delay between pages for faster fetching
+                // Only delay if we have more pages to fetch and haven't hit max
+                if (cursor && pagesFetched < CONFIG.PAGES_TO_FETCH && this.availableServers.size < CONFIG.MAX_JOB_IDS) {
+                    // Skip delay on first few pages for faster initial population
+                    if (pagesFetched > 3) {
+                        await new Promise(resolve => setTimeout(resolve, CONFIG.DELAY_BETWEEN_REQUESTS));
+                    }
                 }
             }
         } finally {
@@ -739,33 +744,58 @@ class JobManager {
     }
 
     /**
-     * Verify if a server is still available (not full) via API
+     * Verify multiple servers at once via API (batch verification)
      * 
-     * Quick check to ensure server hasn't become full since being cached.
+     * Efficiently checks multiple servers in a single API call.
      * Used right before distribution to prevent returning full servers.
      * 
-     * @param {string} jobId - Server job ID to verify
-     * @returns {Promise<boolean>} - True if server is available (not full)
+     * @param {string[]} jobIds - Array of server job IDs to verify
+     * @returns {Promise<Map<string, boolean>>} - Map of jobId -> isAvailable
      */
-    async verifyServerAvailable(jobId) {
+    async verifyServersAvailable(jobIds) {
+        const result = new Map();
+        if (!jobIds || jobIds.length === 0) {
+            return result;
+        }
+
         try {
             const data = await this.fetchPage(null, 0);
             if (!data?.data?.length) {
-                return true; // If API fails, assume available (don't block distribution)
+                // If API fails, mark all as unavailable (safer to reject than accept)
+                for (const jobId of jobIds) {
+                    result.set(jobId, false);
+                }
+                return result;
             }
             
-            const server = data.data.find(s => s.id === jobId);
-            if (!server) {
-                return false; // Server not found - likely stale
+            // Create a map of current server statuses
+            const currentServerStatus = new Map();
+            for (const server of data.data) {
+                if (server.id) {
+                    const players = server.playing || 0;
+                    const maxPlayers = server.maxPlayers || 6;
+                    const isAvailable = players < maxPlayers;
+                    currentServerStatus.set(server.id, isAvailable);
+                }
             }
             
-            const players = server.playing || 0;
-            const maxPlayers = server.maxPlayers || 6;
-            return players < maxPlayers; // Available if not full
+            // Check each requested server
+            for (const jobId of jobIds) {
+                if (currentServerStatus.has(jobId)) {
+                    result.set(jobId, currentServerStatus.get(jobId));
+                } else {
+                    // Server not found - likely stale, mark as unavailable
+                    result.set(jobId, false);
+                }
+            }
         } catch (error) {
-            // If verification fails, assume available (don't block distribution)
-            return true;
+            // If verification fails, mark all as unavailable (safer to reject)
+            for (const jobId of jobIds) {
+                result.set(jobId, false);
+            }
         }
+        
+        return result;
     }
 
     /**
@@ -835,9 +865,9 @@ class JobManager {
                 }
                 
                 // Additional safety: exclude servers that are old (more likely to be stale/full)
-                // Servers older than 2 minutes are more likely to have incorrect player counts
+                // Servers older than 60 seconds are more likely to have incorrect player counts
                 const serverAge = now - (server.timestamp || 0);
-                if (serverAge > 120000) { // 2 minutes (reduced from 3 for better filtering)
+                if (serverAge > 60000) { // 60 seconds (very aggressive for fresh servers)
                     continue;
                 }
 
@@ -859,28 +889,40 @@ class JobManager {
 
             // Use partial sort: only sort if we need more than 1, or use efficient selection
             if (count === 1 && candidates.length > 1) {
-                // Find best candidate without full sort
-                let best = candidates[0];
-                for (let i = 1; i < candidates.length; i++) {
-                    const candidate = candidates[i];
-                    if (candidate.priority > best.priority || 
-                        (candidate.priority === best.priority && candidate.players > best.players)) {
+                // Sort candidates by priority (best first)
+                candidates.sort((a, b) => {
+                    if (a.priority !== b.priority) {
+                        return b.priority - a.priority;
+                    }
+                    return (b.players || 0) - (a.players || 0);
+                });
+                
+                // Verify top 5 candidates at once (batch verification for efficiency)
+                const topCandidates = candidates.slice(0, Math.min(5, candidates.length));
+                const jobIdsToVerify = topCandidates.map(c => c.id);
+                const verificationResults = await this.verifyServersAvailable(jobIdsToVerify);
+                
+                // Find first available server from verified candidates
+                let best = null;
+                for (const candidate of topCandidates) {
+                    const isAvailable = verificationResults.get(candidate.id);
+                    if (isAvailable === true) {
                         best = candidate;
+                        break;
+                    } else {
+                        // Server is full or not found - remove from pool
+                        const normalizedId = candidate.normalizedId;
+                        this.availableServers.delete(normalizedId);
+                        console.log(`[JobManager] Removed full/stale server ${candidate.id} from pool (real-time check)`);
                     }
                 }
                 
-                // Real-time verification: check if server is still available (not full)
-                const isAvailable = await this.verifyServerAvailable(best.id);
-                if (!isAvailable) {
-                    // Server became full - remove from pool and try next candidate
-                    const normalizedId = best.normalizedId;
-                    this.availableServers.delete(normalizedId);
-                    console.log(`[JobManager] Removed full server ${best.id} from pool (real-time check)`);
-                    // Try again with remaining candidates (max 3 retries to prevent infinite recursion)
-                    if (retryCount < 3) {
+                if (!best) {
+                    // All top candidates are full - try again with remaining candidates
+                    if (retryCount < 2 && candidates.length > topCandidates.length) {
                         return this.getNextJob(currentJobId, count, retryCount + 1);
                     } else {
-                        return null; // Too many retries, give up
+                        return null; // No available servers
                     }
                 }
                 
@@ -904,26 +946,33 @@ class JobManager {
                     return (b.players || 0) - (a.players || 0);
                 });
 
-                // Take top N candidates and verify they're still available
+                // Verify top candidates in batch (more efficient)
+                const topCandidates = candidates.slice(0, Math.min(count * 2, candidates.length));
+                const jobIdsToVerify = topCandidates.map(c => c.id);
+                const verificationMap = await this.verifyServersAvailable(jobIdsToVerify);
+
+                // Collect available servers from verified candidates
                 const verifiedResults = [];
-                for (const candidate of candidates.slice(0, count)) {
-                    const isAvailable = await this.verifyServerAvailable(candidate.id);
-                    if (!isAvailable) {
-                        // Server became full - remove from pool
+                for (const candidate of topCandidates) {
+                    if (verifiedResults.length >= count) break;
+                    
+                    const isAvailable = verificationMap.get(candidate.id);
+                    if (isAvailable === true) {
+                        verifiedResults.push(candidate);
+                    } else {
+                        // Server is full or not found - remove from pool
                         const normalizedId = candidate.normalizedId;
                         this.availableServers.delete(normalizedId);
-                        console.log(`[JobManager] Removed full server ${candidate.id} from pool (real-time check)`);
-                        continue;
+                        console.log(`[JobManager] Removed full/stale server ${candidate.id} from pool (real-time check)`);
                     }
-                    verifiedResults.push(candidate);
                 }
 
                 if (verifiedResults.length === 0) {
-                    // All candidates became full - try again (max 3 retries to prevent infinite recursion)
-                    if (retryCount < 3) {
+                    // All candidates became full - try again (max 2 retries)
+                    if (retryCount < 2 && candidates.length > topCandidates.length) {
                         return this.getNextJob(currentJobId, count, retryCount + 1);
                     } else {
-                        return null; // Too many retries, give up
+                        return null; // No available servers
                     }
                 }
 
@@ -1002,7 +1051,7 @@ class JobManager {
     /**
      * Clean up stale servers from available pool
      * 
-     * Removes servers older than JOB_ID_MAX_AGE_MS (5 minutes).
+     * Removes servers older than JOB_ID_MAX_AGE_MS (60 seconds).
      * Stale servers may have incorrect player counts or be unavailable.
      * Also removes servers that appear full based on cached data.
      */
@@ -1260,18 +1309,18 @@ setImmediate(() => {
 });
 
 /**
- * Auto-Refresh Task (runs every 2 minutes)
+ * Auto-Refresh Task (runs every 1 minute)
  * 
- * Automatically fetches more servers when cache drops below 30% capacity.
- * Keeps server pool healthy without manual intervention.
+ * Automatically fetches more servers when cache drops below 50% capacity.
+ * More aggressive threshold and faster interval for faster job ID population.
  */
 setInterval(() => {
-    if (!jobManager.isFetching && jobManager.availableServers.size < CONFIG.MAX_JOB_IDS * 0.3) {
+    if (!jobManager.isFetching && jobManager.availableServers.size < CONFIG.MAX_JOB_IDS * 0.5) {
         jobManager.fetchBulkJobIds().catch(err => {
             console.error('[JobManager] Auto-refresh error:', err.message);
         });
     }
-}, CONFIG.AUTO_REFRESH_INTERVAL_MS);
+}, 60000); // 1 minute instead of 2
 
 /**
  * Full Cache Refresh (runs every 10 minutes)
@@ -1313,13 +1362,13 @@ setInterval(() => {
 }, CONFIG.CLEANUP_INTERVAL_MS);
 
 /**
- * Full Server Check Task (runs every 30 seconds)
+ * Full Server Check Task (runs every 15 seconds)
  * 
  * Periodically checks servers in the available pool to verify they're not full.
  * Removes full servers immediately to prevent "server full" errors for frontend clients.
  * 
  * This runs asynchronously and doesn't block other operations.
- * Very frequent checks (30 seconds) ensure full servers are removed as soon as they fill up.
+ * Very frequent checks (15 seconds) ensure full servers are removed as soon as they fill up.
  */
 setInterval(() => {
     if (!jobManager.isFetching && jobManager.availableServers.size > 0) {
