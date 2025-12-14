@@ -69,11 +69,11 @@ const CONFIG = {
     // Periodic cleanup interval (1 minute)
     CLEANUP_INTERVAL_MS: 60000,
     
-    // Full server check interval (1 minute - more frequent)
-    FULL_SERVER_CHECK_INTERVAL_MS: 60000,
+    // Full server check interval (30 seconds - very frequent for immediate removal)
+    FULL_SERVER_CHECK_INTERVAL_MS: 30000,
     
-    // Number of servers to check per batch for full server verification (increased)
-    FULL_SERVER_CHECK_BATCH_SIZE: 100,
+    // Number of servers to check per batch for full server verification (increased for better coverage)
+    FULL_SERVER_CHECK_BATCH_SIZE: 200,
     
     // Timeout for reserved servers before releasing back to pool (10 seconds)
     PENDING_TIMEOUT_MS: 10000,
@@ -739,22 +739,55 @@ class JobManager {
     }
 
     /**
+     * Verify if a server is still available (not full) via API
+     * 
+     * Quick check to ensure server hasn't become full since being cached.
+     * Used right before distribution to prevent returning full servers.
+     * 
+     * @param {string} jobId - Server job ID to verify
+     * @returns {Promise<boolean>} - True if server is available (not full)
+     */
+    async verifyServerAvailable(jobId) {
+        try {
+            const data = await this.fetchPage(null, 0);
+            if (!data?.data?.length) {
+                return true; // If API fails, assume available (don't block distribution)
+            }
+            
+            const server = data.data.find(s => s.id === jobId);
+            if (!server) {
+                return false; // Server not found - likely stale
+            }
+            
+            const players = server.playing || 0;
+            const maxPlayers = server.maxPlayers || 6;
+            return players < maxPlayers; // Available if not full
+        } catch (error) {
+            // If verification fails, assume available (don't block distribution)
+            return true;
+        }
+    }
+
+    /**
      * Get next available server job ID(s) for distribution
      * 
      * Atomically removes servers from available pool and marks as reserved.
-     * This ensures each server is only given to one user.
+     * Verifies servers are not full right before distribution for immediate removal.
+     * This ensures each server is only given to one user and is not full.
      * 
      * Process:
      * 1. Clean old/stale servers
      * 2. Filter candidates (exclude current, visited, reserved, stale)
      * 3. Use partial sort for efficiency (only sort top N candidates)
-     * 4. Atomically remove from pool and mark as reserved
+     * 4. Verify selected server(s) are not full via API (real-time check)
+     * 5. Atomically remove from pool and mark as reserved
      * 
      * @param {string|null} currentJobId - Current server to exclude from results
      * @param {number} count - Number of servers to return (1-10)
-     * @returns {Object|Object[]|null} - Server object(s) or null if none available
+     * @param {number} retryCount - Internal retry counter to prevent infinite recursion
+     * @returns {Promise<Object|Object[]|null>} - Server object(s) or null if none available
      */
-    getNextJob(currentJobId, count = 1) {
+    async getNextJob(currentJobId, count = 1, retryCount = 0) {
         // Prevent concurrent distribution
         if (this.distributionLock) {
             return null;
@@ -835,6 +868,22 @@ class JobManager {
                         best = candidate;
                     }
                 }
+                
+                // Real-time verification: check if server is still available (not full)
+                const isAvailable = await this.verifyServerAvailable(best.id);
+                if (!isAvailable) {
+                    // Server became full - remove from pool and try next candidate
+                    const normalizedId = best.normalizedId;
+                    this.availableServers.delete(normalizedId);
+                    console.log(`[JobManager] Removed full server ${best.id} from pool (real-time check)`);
+                    // Try again with remaining candidates (max 3 retries to prevent infinite recursion)
+                    if (retryCount < 3) {
+                        return this.getNextJob(currentJobId, count, retryCount + 1);
+                    } else {
+                        return null; // Too many retries, give up
+                    }
+                }
+                
                 const normalizedId = best.normalizedId;
                 const serverData = this.availableServers.get(normalizedId);
                 if (serverData) {
@@ -855,11 +904,31 @@ class JobManager {
                     return (b.players || 0) - (a.players || 0);
                 });
 
-                // Take top N candidates
-                const results = candidates.slice(0, count);
+                // Take top N candidates and verify they're still available
+                const verifiedResults = [];
+                for (const candidate of candidates.slice(0, count)) {
+                    const isAvailable = await this.verifyServerAvailable(candidate.id);
+                    if (!isAvailable) {
+                        // Server became full - remove from pool
+                        const normalizedId = candidate.normalizedId;
+                        this.availableServers.delete(normalizedId);
+                        console.log(`[JobManager] Removed full server ${candidate.id} from pool (real-time check)`);
+                        continue;
+                    }
+                    verifiedResults.push(candidate);
+                }
+
+                if (verifiedResults.length === 0) {
+                    // All candidates became full - try again (max 3 retries to prevent infinite recursion)
+                    if (retryCount < 3) {
+                        return this.getNextJob(currentJobId, count, retryCount + 1);
+                    } else {
+                        return null; // Too many retries, give up
+                    }
+                }
 
                 // Atomically remove from pool and mark as reserved
-                for (const result of results) {
+                for (const result of verifiedResults) {
                     const normalizedId = result.normalizedId;
                     const serverData = this.availableServers.get(normalizedId);
                     if (serverData) {
@@ -871,8 +940,8 @@ class JobManager {
                     }
                 }
 
-                console.log(`[JobManager] Distributed ${results.length} server(s) to frontend (${this.availableServers.size} remaining)`);
-                return count === 1 ? results[0] : results;
+                console.log(`[JobManager] Distributed ${verifiedResults.length} server(s) to frontend (${this.availableServers.size} remaining)`);
+                return count === 1 ? verifiedResults[0] : verifiedResults;
             }
         } catch (error) {
             console.error('[JobManager] Error in getNextJob:', error);
@@ -1244,13 +1313,13 @@ setInterval(() => {
 }, CONFIG.CLEANUP_INTERVAL_MS);
 
 /**
- * Full Server Check Task (runs every 1 minute)
+ * Full Server Check Task (runs every 30 seconds)
  * 
  * Periodically checks servers in the available pool to verify they're not full.
- * Removes full servers to prevent "server full" errors for frontend clients.
+ * Removes full servers immediately to prevent "server full" errors for frontend clients.
  * 
  * This runs asynchronously and doesn't block other operations.
- * More frequent checks ensure full servers are removed quickly.
+ * Very frequent checks (30 seconds) ensure full servers are removed as soon as they fill up.
  */
 setInterval(() => {
     if (!jobManager.isFetching && jobManager.availableServers.size > 0) {
@@ -1386,12 +1455,12 @@ app.post('/api/pet-found', rateLimit, authenticate, (req, res) => {
  * - 200: Success
  * - 503: No servers available (cache empty/refreshing)
  */
-app.get('/api/server/next', rateLimit, authenticate, (req, res) => {
+app.get('/api/server/next', rateLimit, authenticate, async (req, res) => {
     try {
         const currentJobId = req.query.currentJobId ? String(req.query.currentJobId).trim() : null;
         const count = Math.min(Math.max(parseInt(req.query.count) || 1, 1), 10);
 
-        const result = jobManager.getNextJob(currentJobId, count);
+        const result = await jobManager.getNextJob(currentJobId, count);
 
         if (!result) {
             if (!jobManager.isFetching && jobManager.availableServers.size < 100) {
